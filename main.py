@@ -46,10 +46,10 @@ def send(msg):
 # FETCH DATA
 # =========================
 def fetch():
-    r = requests.get(API_URL)
+    url = "https://uma.moe/api/v4/circles"
+    r = requests.get(url)
+    print(r.text)
     r.raise_for_status()
-    return r.json()
-
 
 # =========================
 # EXTRACT MEMBERS
