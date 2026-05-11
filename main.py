@@ -5,19 +5,13 @@ import os
 # =========================
 # CONFIG
 # =========================
-API_URL = "https://uma.moe/api/v4/circles"
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-
 STATE_FILE = "state/member_state.json"
-
 TOP_N = 1500
-
-# CHANGE THIS IF NEEDED AFTER INSPECTING API
-RANK_FIELD = "rank"
 
 
 # =========================
-# STATE HANDLING
+# STATE
 # =========================
 def load_state():
     if not os.path.exists(STATE_FILE):
@@ -43,24 +37,42 @@ def send(msg):
 
 
 # =========================
-# FETCH DATA
+# FETCH ALL CIRCLES
 # =========================
-def fetch():
-    url = "https://uma.moe/api/v4/circles"
-    r = requests.get(url)
-    print(r.text)
-    r.raise_for_status()
+def fetch_all_circles():
+    circles = []
+    page = 0
+    limit = 100
+
+    while True:
+        url = f"https://uma.moe/api/v4/circles/list?page={page}&limit={limit}&sort_by=rank&sort_dir=asc"
+        r = requests.get(url)
+        r.raise_for_status()
+        data = r.json()
+
+        batch = data.get("circles", data)
+
+        if not batch:
+            break
+
+        circles.extend(batch)
+
+        if len(batch) < limit:
+            break
+
+        page += 1
+
+    return circles
+
 
 # =========================
-# EXTRACT MEMBERS
+# BUILD MEMBER LIST
 # =========================
-def extract(data):
+def build_members(circles):
     members = {}
 
-    circles = data.get("circles", data if isinstance(data, list) else [])
-
     for c in circles:
-        club = c.get("name") or c.get("club_name")
+        club = c.get("name")
 
         for m in c.get("members", []):
             mid = str(m.get("id"))
@@ -68,25 +80,23 @@ def extract(data):
             members[mid] = {
                 "name": m.get("name"),
                 "club": club,
-                "rank": m.get(RANK_FIELD, 999999)
+                "rank": m.get("rank", 999999)
             }
 
     return members
 
 
 # =========================
-# TOP 1500 FILTER (GUARANTEED)
+# TOP 1500 FILTER
 # =========================
 def top_filter(members):
-    sorted_members = sorted(
-        members.items(),
-        key=lambda x: x[1]["rank"]
+    return dict(
+        sorted(members.items(), key=lambda x: x[1]["rank"])[:TOP_N]
     )
-    return dict(sorted_members[:TOP_N])
 
 
 # =========================
-# COMPARE
+# DIFF
 # =========================
 def diff(old, new):
     joined, left, moved = [], [], []
@@ -111,8 +121,10 @@ def diff(old, new):
 # MAIN
 # =========================
 def main():
-    data = fetch()
-    all_members = extract(data)
+    print("Fetching data...")
+
+    circles = fetch_all_circles()
+    all_members = build_members(circles)
 
     current = top_filter(all_members)
     previous = load_state()
@@ -120,7 +132,7 @@ def main():
     if not previous:
         save_state(current)
         send("📊 Initial Top 1500 snapshot saved.")
-        print("Init done")
+        print("Init complete")
         return
 
     joined, left, moved = diff(previous, current)
@@ -142,14 +154,18 @@ def main():
     if moved:
         msg = "🟡 Club Transfers\n"
         for i, o, n in moved:
-            msg += f"- `{i}` {o['name']}\n  {o['club']} → {n['club']}\n  Rank {o['rank']} → {n['rank']}\n"
+            msg += (
+                f"- `{i}` {o['name']}\n"
+                f"  {o['club']} → {n['club']}\n"
+                f"  Rank {o['rank']} → {n['rank']}\n"
+            )
         msgs.append(msg)
 
     if msgs:
         send("\n".join(msgs))
         print("\n".join(msgs))
     else:
-        print("No changes")
+        print("No changes detected")
 
     save_state(current)
 
