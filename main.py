@@ -27,7 +27,7 @@ def save_state(data):
 
 
 # =========================
-# WEBHOOK
+# DISCORD WEBHOOK
 # =========================
 def send(msg):
     if not WEBHOOK_URL:
@@ -37,7 +37,7 @@ def send(msg):
 
 
 # =========================
-# FETCH ALL CIRCLES
+# FETCH ALL CIRCLES (PAGINATED)
 # =========================
 def fetch_all_circles():
     circles = []
@@ -45,7 +45,11 @@ def fetch_all_circles():
     limit = 100
 
     while True:
-        url = f"https://uma.moe/api/v4/circles/list?page={page}&limit={limit}&sort_by=rank&sort_dir=asc"
+        url = (
+            f"https://uma.moe/api/v4/circles/list"
+            f"?page={page}&limit={limit}&sort_by=rank&sort_dir=asc"
+        )
+
         r = requests.get(url)
         r.raise_for_status()
         data = r.json()
@@ -66,7 +70,7 @@ def fetch_all_circles():
 
 
 # =========================
-# BUILD MEMBER LIST
+# BUILD MEMBER MAP
 # =========================
 def build_members(circles):
     members = {}
@@ -77,10 +81,14 @@ def build_members(circles):
         for m in c.get("members", []):
             mid = str(m.get("id"))
 
+            rank = m.get("rank")
+            if rank is None:
+                rank = -1
+
             members[mid] = {
                 "name": m.get("name"),
                 "club": club,
-                "rank": m.get("rank", 999999)
+                "rank": rank
             }
 
     return members
@@ -96,25 +104,42 @@ def top_filter(members):
 
 
 # =========================
-# DIFF
+# DIFF ENGINE
 # =========================
 def diff(old, new):
-    joined, left, moved = [], [], []
+    joined = []
+    left = []
+    moved = []
+    rank_changes = []
 
     old_ids = set(old.keys())
     new_ids = set(new.keys())
 
+    # Joined
     for i in new_ids - old_ids:
         joined.append((i, new[i]))
 
+    # Left
     for i in old_ids - new_ids:
         left.append((i, old[i]))
 
+    # Inside Top 1500 changes
     for i in old_ids & new_ids:
-        if old[i]["club"] != new[i]["club"]:
-            moved.append((i, old[i], new[i]))
+        old_m = old[i]
+        new_m = new[i]
 
-    return joined, left, moved
+        # club transfer
+        if old_m["club"] != new_m["club"]:
+            moved.append((i, old_m, new_m))
+
+        # rank movement
+        if old_m["rank"] != -1 and new_m["rank"] != -1:
+            diff_val = old_m["rank"] - new_m["rank"]
+
+            if diff_val != 0:
+                rank_changes.append((i, old_m, new_m, diff_val))
+
+    return joined, left, moved, rank_changes
 
 
 # =========================
@@ -132,25 +157,34 @@ def main():
     if not previous:
         save_state(current)
         send("📊 Initial Top 1500 snapshot saved.")
-        print("Init complete")
+        print("Initialized")
         return
 
-    joined, left, moved = diff(previous, current)
+    joined, left, moved, rank_changes = diff(previous, current)
 
-    msgs = []
+    messages = []
 
+    # =========================
+    # ENTERED TOP 1500
+    # =========================
     if joined:
         msg = "🟢 Entered Top 1500\n"
         for i, m in joined:
             msg += f"- `{i}` {m['name']} | {m['club']} | Rank {m['rank']}\n"
-        msgs.append(msg)
+        messages.append(msg)
 
+    # =========================
+    # DROPPED OUT
+    # =========================
     if left:
         msg = "🔴 Dropped out of Top 1500\n"
         for i, m in left:
             msg += f"- `{i}` {m['name']} | {m['club']} | Rank {m['rank']}\n"
-        msgs.append(msg)
+        messages.append(msg)
 
+    # =========================
+    # CLUB TRANSFERS
+    # =========================
     if moved:
         msg = "🟡 Club Transfers\n"
         for i, o, n in moved:
@@ -159,11 +193,30 @@ def main():
                 f"  {o['club']} → {n['club']}\n"
                 f"  Rank {o['rank']} → {n['rank']}\n"
             )
-        msgs.append(msg)
+        messages.append(msg)
 
-    if msgs:
-        send("\n".join(msgs))
-        print("\n".join(msgs))
+    # =========================
+    # RANK MOVEMENT
+    # =========================
+    if rank_changes:
+        msg = "📈 Rank Movement\n"
+        for i, o, n, d in rank_changes:
+
+            arrow = "📈" if d > 0 else "📉"
+
+            msg += (
+                f"- `{i}` {o['name']} {arrow}\n"
+                f"  Rank {o['rank']} → {n['rank']} (Δ {d})\n"
+            )
+
+        messages.append(msg)
+
+    # =========================
+    # SEND RESULTS
+    # =========================
+    if messages:
+        send("\n".join(messages))
+        print("\n".join(messages))
     else:
         print("No changes detected")
 
