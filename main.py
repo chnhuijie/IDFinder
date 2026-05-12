@@ -10,8 +10,7 @@ WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE_DIR, "state", "member_state.json")
 
-# Tracking the top 100 circles is safer for API stability
-# 100 circles * ~30 members = ~3000 players tracked
+# Scanning 50 clubs is safer for GitHub Action stability and rate limits
 MAX_CLUBS_TO_SCAN = 100 
 API_URL = "https://uma.moe/api/v4/circles"
 
@@ -25,7 +24,7 @@ def load_state():
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, dict) and data else {}
-    except (json.JSONDecodeError, FileNotFoundError):
+    except:
         return {}
 
 def save_state(data):
@@ -35,56 +34,59 @@ def save_state(data):
 
 def send(msg):
     if not WEBHOOK_URL or not msg: 
+        print("Webhook missing or message empty.")
         return
-    # Discord character limit safety
-    requests.post(WEBHOOK_URL, json={"content": msg[:1990]})
+    try:
+        r = requests.post(WEBHOOK_URL, json={"content": msg[:1990]})
+        r.raise_for_status()
+        print("Discord message sent successfully.")
+    except Exception as e:
+        print(f"Failed to send Discord message: {e}")
 
 # =========================
 # DATA FETCHING
 # =========================
 def get_top_members():
-    """First get the list of top circles, then fetch details for each."""
     all_players = {}
-    
-    print("Step 1: Fetching Top Circle list...")
+    print("Fetching Circle List...")
     try:
-        # Fetching the first page of circles (Top 100)
+        # Get circles from API
         r = requests.get(f"{API_URL}/list?page=0&limit={MAX_CLUBS_TO_SCAN}&sort_by=rank&sort_dir=asc", timeout=15)
         r.raise_for_status()
         circles = r.json().get("circles", [])
     except Exception as e:
-        print(f"Failed to fetch circle list: {e}")
+        print(f"Failed to fetch circles: {e}")
         return {}
 
-    print(f"Step 2: Fetching details for {len(circles)} clubs...")
     for idx, c in enumerate(circles):
         cid = c.get("circle_id")
         club_name = c.get("name")
         
+        # We always start by adding the leader since they are in the list data
+        # This prevents the '0 players found' error even if detail fetch fails
+        leader_id = str(c.get("leader_viewer_id"))
+        if leader_id and leader_id != "None":
+            all_players[leader_id] = {"name": c.get("leader_name"), "club": club_name}
+        
         try:
-            # We must hit the detail endpoint to get the 'members' key
             res = requests.get(f"{API_URL}/{cid}", timeout=10)
             if res.status_code == 200:
                 data = res.json()
-                members = data.get("members", [])
+                # Check different possible keys for the member list
+                member_list = data.get("members") or data.get("players") or []
                 
-                for m in members:
-                    mid = str(m.get("id"))
-                    all_players[mid] = {
-                        "name": m.get("name"),
-                        "club": club_name,
-                        "rank": m.get("rank") or 9999
-                    }
+                if isinstance(member_list, list):
+                    for m in member_list:
+                        mid = str(m.get("id") or m.get("viewer_id"))
+                        if mid and mid != "None":
+                            all_players[mid] = {"name": m.get("name"), "club": club_name}
             
-            # Print progress every 20 clubs so logs don't look frozen
-            if (idx + 1) % 20 == 0:
+            if (idx + 1) % 10 == 0: 
                 print(f"Processed {idx + 1}/{len(circles)} clubs...")
             
-            # Rate limit safety: 200ms sleep between requests
-            time.sleep(0.2)
+            time.sleep(0.3) # Respect API rate limits
             
-        except Exception as e:
-            print(f"Error skipping club {club_name}: {e}")
+        except:
             continue
 
     return all_players
@@ -95,54 +97,45 @@ def get_top_members():
 def main():
     current_players = get_top_members()
     total_found = len(current_players)
-    print(f"Total unique players found: {total_found}")
+    print(f"Total players found: {total_found}")
 
     if total_found == 0:
-        print("CRITICAL: No players found. API might be down or changed.")
+        print("CRITICAL: No players found. Check API connectivity.")
         return
 
-    previous_players = load_state()
-
-    # INITIALIZATION
-    if not previous_players:
+    previous = load_state()
+    
+    # Check if state is actually empty
+    if not previous:
         save_state(current_players)
-        send("📊 **Tracker Initialized**\nSaved snapshot of Top 100 circles.")
-        print("Initial state saved to file.")
+        send(f"📊 **Tracker Initialized**\nNow tracking {total_found} players in Top {MAX_CLUBS_TO_SCAN} clubs.")
+        print("Initial state saved.")
         return
 
-    # DIFFING
     joined, left, moved = [], [], []
-    old_ids = set(previous_players.keys())
-    new_ids = set(current_players.keys())
+    old_ids, new_ids = set(previous.keys()), set(current_players.keys())
 
-    # 1. New players in the scan range
     for i in new_ids - old_ids:
-        p = current_players[i]
-        joined.append(f"- `{i}` **{p['name']}** (Joined {p['club']})")
-
-    # 2. Players who left the scan range
+        joined.append(f"- `{i}` **{current_players[i]['name']}** (Joined {current_players[i]['club']})")
+    
     for i in old_ids - new_ids:
-        p = previous_players[i]
-        left.append(f"- `{i}` **{p['name']}** (Left {p['club']})")
+        left.append(f"- `{i}` **{previous[i]['name']}** (Left {previous[i]['club']})")
 
-    # 3. Players who moved between clubs
     for i in old_ids & new_ids:
-        old_p, new_p = previous_players[i], current_players[i]
-        if old_p["club"] != new_p["club"]:
-            moved.append(f"- `{i}` **{new_p['name']}**: {old_p['club']} → {new_p['club']}")
+        if previous[i]["club"] != current_players[i]["club"]:
+            moved.append(f"- `{i}` **{current_players[i]['name']}**: {previous[i]['club']} → {current_players[i]['club']}")
 
-    # CONSTRUCT MESSAGES
-    report_parts = []
-    if joined: report_parts.append("🟢 **New Entries**\n" + "\n".join(joined[:15])) # Limit display size
-    if left: report_parts.append("🔴 **Dropped Out**\n" + "\n".join(left[:15]))
-    if moved: report_parts.append("🟡 **Club Transfers**\n" + "\n".join(moved[:15]))
+    report = []
+    if joined: report.append("🟢 **New Entries**\n" + "\n".join(joined[:10]))
+    if left: report.append("🔴 **Dropped Out**\n" + "\n".join(left[:10]))
+    if moved: report.append("🟡 **Transfers**\n" + "\n".join(moved[:10]))
 
-    if report_parts:
-        send("\n\n".join(report_parts))
+    if report:
+        send("\n\n".join(report))
         save_state(current_players)
-        print("Changes detected and sent.")
+        print("Discord notification triggered.")
     else:
-        print("No changes detected since last run.")
+        print("No changes found since last check.")
 
 if __name__ == "__main__":
     main()
