@@ -13,7 +13,7 @@ TOP_N = 1000
 API_URL = "https://uma.moe/api/v4/circles/list"
 
 # =========================
-# STATE
+# STATE & HELPERS
 # =========================
 def load_state():
     if not os.path.exists(STATE_FILE):
@@ -30,14 +30,8 @@ def save_state(data):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-# =========================
-# DISCORD
-# =========================
 def send(msg):
-    if not WEBHOOK_URL:
-        print("No webhook set")
-        return
-    # Truncate to stay under Discord's 2000 character limit
+    if not WEBHOOK_URL: return
     requests.post(WEBHOOK_URL, json={"content": msg[:1990]})
 
 # =========================
@@ -46,19 +40,24 @@ def send(msg):
 def fetch_all_circles():
     circles = []
     page = 0
-    limit = 100
-    MAX_PAGES = 15 # Top 1000 is usually within the first 10-15 pages
+    MAX_PAGES = 15
 
     while page < MAX_PAGES:
-        url = f"{API_URL}?page={page}&limit={limit}&sort_by=rank&sort_dir=asc"
+        # Added with_members=true to ensure the API includes the member list
+        url = f"{API_URL}?page={page}&limit=100&sort_by=rank&sort_dir=asc&with_members=true"
         try:
-            r = requests.get(url, timeout=10)
+            r = requests.get(url, timeout=15)
             r.raise_for_status()
             data = r.json()
+            
+            # Diagnostic: Print keys of the first circle to verify structure in logs
+            if page == 0 and data.get("circles"):
+                print(f"DEBUG: First circle keys: {list(data['circles'][0].keys())}")
+                
             batch = data.get("circles", [])
             if not batch: break
             circles.extend(batch)
-            if len(batch) < limit: break
+            if len(batch) < 100: break
             page += 1
         except Exception as e:
             print(f"Fetch error: {e}")
@@ -69,8 +68,8 @@ def build_members(circles):
     members = {}
     for c in circles:
         club_name = c.get("name")
-        # Try to find the member list (API may use 'members' or 'leaderboard')
-        member_list = c.get("members", [])
+        # Handle cases where members might be in 'members' or 'players'
+        member_list = c.get("members") or c.get("players") or []
         
         if isinstance(member_list, list):
             for m in member_list:
@@ -84,34 +83,17 @@ def build_members(circles):
     return members
 
 # =========================
-# DIFF ENGINE
-# =========================
-def diff(old, new):
-    joined, left, moved, rank_changes = [], [], [], []
-    old_ids, new_ids = set(old.keys()), set(new.keys())
-
-    for i in new_ids - old_ids: joined.append((i, new[i]))
-    for i in old_ids - new_ids: left.append((i, old[i]))
-    for i in old_ids & new_ids:
-        o, n = old[i], new[i]
-        if o["club"] != n["club"]: moved.append((i, o, n))
-        if o["rank"] < 9999 and n["rank"] < 9999:
-            d = o["rank"] - n["rank"]
-            if d != 0: rank_changes.append((i, o, n, d))
-    return joined, left, moved, rank_changes
-
-# =========================
-# MAIN
+# MAIN LOGIC
 # =========================
 def main():
-    print("Fetching data...")
+    print("Fetching data with member details...")
     circles = fetch_all_circles()
     all_members = build_members(circles)
     
     print(f"Total unique members found: {len(all_members)}")
     
     if not all_members:
-        print("CRITICAL: No members found. Check API structure.")
+        print("CRITICAL: No members found. Structure check required.")
         return
 
     current = dict(sorted(all_members.items(), key=lambda x: x[1]["rank"])[:TOP_N])
@@ -120,30 +102,28 @@ def main():
     if not previous:
         save_state(current)
         send("📊 Initial Top 1000 snapshot saved.")
+        print("Initial state saved.")
         return
 
-    joined, left, moved, rank_changes = diff(previous, current)
+    # Diffing
+    joined, left, moved = [], [], []
+    old_ids, new_ids = set(previous.keys()), set(current.keys())
+
+    for i in new_ids - old_ids: joined.append(f"- `{i}` {current[i]['name']} | {current[i]['club']}")
+    for i in old_ids - new_ids: left.append(f"- `{i}` {previous[i]['name']} | {previous[i]['club']}")
+    for i in old_ids & new_ids:
+        if previous[i]["club"] != current[i]["club"]:
+            moved.append(f"- `{i}` {current[i]['name']}: {previous[i]['club']} → {current[i]['club']}")
+
     messages = []
-
-    if joined:
-        msg = "🟢 **Entered Top 1000**\n"
-        for i, m in joined: msg += f"- `{i}` {m['name']} | {m['club']}\n"
-        messages.append(msg)
-
-    if left:
-        msg = "🔴 **Dropped out of Top 1000**\n"
-        for i, m in left: msg += f"- `{i}` {m['name']} | {m['club']}\n"
-        messages.append(msg)
-
-    if moved:
-        msg = "🟡 **Club Transfers**\n"
-        for i, o, n in moved: msg += f"- `{i}` {o['name']}: {o['club']} → {n['club']}\n"
-        messages.append(msg)
+    if joined: messages.append("🟢 **Entered Top 1000**\n" + "\n".join(joined))
+    if left: messages.append("🔴 **Dropped out of Top 1000**\n" + "\n".join(left))
+    if moved: messages.append("🟡 **Club Transfers**\n" + "\n".join(moved))
 
     if messages:
         send("\n".join(messages))
         save_state(current)
-        print("Changes sent to Discord and state updated.")
+        print("Updates sent.")
     else:
         print("No changes detected.")
 
