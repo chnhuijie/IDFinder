@@ -11,7 +11,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE_DIR, "state", "member_state.json")
 
 # Scanning 50 clubs is safer for GitHub Action stability and rate limits
-MAX_CLUBS_TO_SCAN = 500 
+MAX_CLUBS_TO_SCAN = 1500 
 API_URL = "https://uma.moe/api/v4/circles"
 
 # =========================
