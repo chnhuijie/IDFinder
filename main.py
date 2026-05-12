@@ -9,9 +9,14 @@ import time
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE_DIR, "state", "member_state.json")
-# Updated to track 1000 clubs
-MAX_CLUBS_TO_SCAN = 1000 
+# Updated to track 500 clubs
+MAX_CLUBS_TO_SCAN = 500 
 API_URL = "https://uma.moe/api/v4/circles"
+
+# Mimic a real browser to help avoid shadow blocking
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
 
 # =========================
 # STATE HELPERS
@@ -38,17 +43,16 @@ def send_discord(msg):
 def safe_get(url):
     """Handles API throttling, 404s, and returns JSON or None."""
     try:
-        response = requests.get(url, timeout=15)
+        response = requests.get(url, headers=HEADERS, timeout=15)
         
-        # FIX: Skip immediately if the club no longer exists (404)
+        # Skip immediately if the club is gone (prevents retry loops on dead links)
         if response.status_code == 404:
             print(f"Skipping: {url} (Not Found)")
             return None
 
         if response.status_code == 429:
-            # If throttled, get wait time from header or default to 60s
             wait = int(response.headers.get("Retry-After", 60))
-            # FIX: Cap the wait time to avoid timing out the GitHub Action
+            # Cap wait time to prevent GitHub Action timeout
             wait = min(wait, 120) 
             print(f"Throttled! Sleeping for {wait} seconds...")
             time.sleep(wait)
@@ -67,13 +71,13 @@ def get_top_members():
     all_players = {}
     circles = []
     
-    # Updated to 10 pages for 1000 clubs
-    print("Step 1: Fetching 1000 Circle IDs...")
-    for page in range(10): 
+    # 5 pages * 100 per page = Top 500
+    print("Step 1: Fetching 500 Circle IDs...")
+    for page in range(5): 
         data = safe_get(f"{API_URL}/list?page={page}&limit=100&sort_by=rank&sort_dir=asc")
         if data and "circles" in data:
             circles.extend(data["circles"])
-            time.sleep(0.6) # Slight delay between list pages
+            time.sleep(0.6) 
         else: break
 
     print(f"Step 2: Fetching rosters for {len(circles)} clubs...")
@@ -89,14 +93,14 @@ def get_top_members():
                     mid = str(m.get("id") or m.get("viewer_id"))
                     all_players[mid] = {"name": m.get("name"), "club": club_name}
             else:
-                # Fallback to leader if roster data isn't exposed
+                # Fallback to leader if full roster is hidden
                 lid = str(c.get("leader_viewer_id"))
                 all_players[lid] = {"name": c.get("leader_name"), "club": club_name}
         
         if (idx + 1) % 100 == 0:
             print(f"Progress: {idx + 1}/{len(circles)} scanned...")
         
-        # FIX: Increased sleep to 0.7s to prevent heavy throttling
+        # Polite delay to avoid IP flagging
         time.sleep(0.7) 
 
     return all_players
@@ -115,13 +119,12 @@ def main():
     previous = load_state()
     if not previous:
         save_state(current_players)
-        send_discord(f"📊 **Tracker Initialized**\nTracking {total_found} players in Top 1000.")
+        send_discord(f"📊 **Tracker Initialized**\nNow tracking {total_found} players in Top 500.")
         return
 
     old_ids = set(previous.keys())
     new_ids = set(current_players.keys())
 
-    # Diffing logic
     joined = [f"- `{i}` **{current_players[i]['name']}** ({current_players[i]['club']})" for i in (new_ids - old_ids)]
     vanished = [f"- `{i}` **{previous[i]['name']}** (Last seen: {previous[i]['club']})" for i in (old_ids - new_ids)]
     transfers = [f"- `{i}` **{current_players[i]['name']}**: {previous[i]['club']} → {current_players[i]['club']}" 
@@ -129,7 +132,7 @@ def main():
 
     report = []
     if joined: report.append("🟢 **New Entries**\n" + "\n".join(joined[:15]))
-    if vanished: report.append("🔴 **Left Top 1000 Entirely**\n" + "\n".join(vanished[:15]))
+    if vanished: report.append("🔴 **Left Top 500 Entirely**\n" + "\n".join(vanished[:15]))
     if transfers: report.append("🟡 **Club Transfers**\n" + "\n".join(transfers[:15]))
 
     if report:
