@@ -1,18 +1,19 @@
-name: UMA Top 1500 Tracker
+name: Uma Roster Tracker
 
 on:
   schedule:
-    - cron: "10 15 * * *"  # 11:10 PM PH Time
-  workflow_dispatch:
-
-permissions:
-  contents: write
+    # Runs daily at 15:10 UTC (11:10 PM PH Time)
+    - cron: '10 15 * * *'
+  workflow_dispatch: # Allows you to run it manually
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    # Added safety timeout for the 1500-club scan
+    # Explicit timeout for the 1500-club/12-minute execution
     timeout-minutes: 30 
+    
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repo
@@ -23,7 +24,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -33,12 +34,20 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python main.py
 
-      - name: Commit state changes
+      - name: Commit and Push changes
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          # Pull first to prevent "non-fast-forward" errors if the repo changed
-          git pull origin main 
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # Pull latest to avoid conflicts during the long run
+          git pull origin main --rebase
+          
           git add state/member_state.json
-          git commit -m "Update state: $(date +'%Y-%m-%d %H:%M')" || exit 0
-          git push
+          
+          # Only commit if there is actual player movement
+          if git diff --staged --quiet; then
+            echo "No changes detected. Skipping commit."
+          else
+            git commit -m "Update state: $(date +'%Y-%m-%d %H:%M')"
+            git push origin main
+          fi
