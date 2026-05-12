@@ -6,10 +6,12 @@ import os
 # CONFIG
 # =========================
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-STATE_FILE = "state/member_state.json"
+
+# Use absolute paths to ensure GitHub Actions finds the file regardless of workdir
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE_FILE = os.path.join(BASE_DIR, "state", "member_state.json")
 
 TOP_N = 1000
-
 API_URL = "https://uma.moe/api/v4/circles/list"
 
 
@@ -17,13 +19,20 @@ API_URL = "https://uma.moe/api/v4/circles/list"
 # STATE
 # =========================
 def load_state():
+    """Loads previous state, handling missing or empty files."""
     if not os.path.exists(STATE_FILE):
         return {}
-    with open(STATE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            # Ensure we return an empty dict if the file just contains {}
+            return data if isinstance(data, dict) and data else {}
+    except (json.JSONDecodeError, FileNotFoundError):
+        return {}
 
 
 def save_state(data):
+    """Saves the current state to the JSON file."""
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -36,7 +45,9 @@ def send(msg):
     if not WEBHOOK_URL:
         print("No webhook set")
         return
-    requests.post(WEBHOOK_URL, json={"content": msg})
+    # Discord messages are capped at 2000 chars; truncate if necessary
+    payload = {"content": msg[:1990]} 
+    requests.post(WEBHOOK_URL, json=payload)
 
 
 # =========================
@@ -46,13 +57,10 @@ def fetch_all_circles():
     circles = []
     page = 0
     limit = 100
-    MAX_PAGES = 30  # 🔥 HARD SAFETY LIMIT (prevents 6+ min runtime)
+    MAX_PAGES = 30  # Safety limit
 
     while page < MAX_PAGES:
-        url = (
-            f"{API_URL}?page={page}"
-            f"&limit={limit}&sort_by=rank&sort_dir=asc"
-        )
+        url = f"{API_URL}?page={page}&limit={limit}&sort_by=rank&sort_dir=asc"
 
         try:
             r = requests.get(url, timeout=10)
@@ -63,13 +71,10 @@ def fetch_all_circles():
             break
 
         batch = data.get("circles", data)
-
         if not batch:
             break
 
         circles.extend(batch)
-
-        # stop if last page is incomplete
         if len(batch) < limit:
             break
 
@@ -83,23 +88,18 @@ def fetch_all_circles():
 # =========================
 def build_members(circles):
     members = {}
-
     for c in circles:
         club = c.get("name")
-
         for m in c.get("members", []):
             mid = str(m.get("id"))
-
-            rank = m.get("rank")
-            if rank is None:
-                rank = -1
-
+            # Default to a high rank if none provided to keep sorting consistent
+            rank = m.get("rank") if m.get("rank") is not None else 9999
+            
             members[mid] = {
                 "name": m.get("name"),
                 "club": club,
                 "rank": rank
             }
-
     return members
 
 
@@ -117,7 +117,6 @@ def top_filter(members):
 # =========================
 def diff(old, new):
     joined, left, moved, rank_changes = [], [], [], []
-
     old_ids = set(old.keys())
     new_ids = set(new.keys())
 
@@ -128,13 +127,12 @@ def diff(old, new):
         left.append((i, old[i]))
 
     for i in old_ids & new_ids:
-        o = old[i]
-        n = new[i]
-
+        o, n = old[i], new[i]
         if o["club"] != n["club"]:
             moved.append((i, o, n))
-
-        if o["rank"] != -1 and n["rank"] != -1:
+        
+        # Track rank movement only if both ranks are valid
+        if o["rank"] < 9999 and n["rank"] < 9999:
             delta = o["rank"] - n["rank"]
             if delta != 0:
                 rank_changes.append((i, o, n, delta))
@@ -146,65 +144,59 @@ def diff(old, new):
 # MAIN
 # =========================
 def main():
-    print("Fetching circles...")
-
+    print("Fetching data from API...")
     circles = fetch_all_circles()
-    members = build_members(circles)
+    all_members = build_members(circles)
 
-    current = top_filter(members)
+    current = top_filter(all_members)
     previous = load_state()
 
+    # INITIALIZATION: If previous state is empty/non-existent
     if not previous:
         save_state(current)
         send("📊 Initial Top 1000 snapshot saved.")
-        print("Initialized")
+        print("Initialized new state file.")
         return
 
+    # COMPARISON
     joined, left, moved, rank_changes = diff(previous, current)
-
     messages = []
 
-    # JOINED
     if joined:
-        msg = "🟢 Entered Top 1000\n"
+        msg = "🟢 **Entered Top 1000**\n"
         for i, m in joined:
             msg += f"- `{i}` {m['name']} | {m['club']} | Rank {m['rank']}\n"
         messages.append(msg)
 
-    # LEFT
     if left:
-        msg = "🔴 Dropped out of Top 1000\n"
+        msg = "🔴 **Dropped out of Top 1000**\n"
         for i, m in left:
             msg += f"- `{i}` {m['name']} | {m['club']} | Rank {m['rank']}\n"
         messages.append(msg)
 
-    # TRANSFERS
     if moved:
-        msg = "🟡 Club Transfers\n"
+        msg = "🟡 **Club Transfers**\n"
         for i, o, n in moved:
-            msg += (
-                f"- `{i}` {o['name']}\n"
-                f"  {o['club']} → {n['club']}\n"
-                f"  Rank {o['rank']} → {n['rank']}\n"
-            )
+            msg += f"- `{i}` {o['name']}: {o['club']} → {n['club']}\n"
         messages.append(msg)
 
-    # RANK MOVEMENT
     if rank_changes:
-        msg = "📈 Rank Movement\n"
+        # Only report significant rank jumps if the list is too long
+        msg = "📈 **Rank Movement**\n"
         for i, o, n, d in rank_changes:
             arrow = "📈" if d > 0 else "📉"
-            msg += f"- `{i}` {o['name']} {arrow}\n  {o['rank']} → {n['rank']} (Δ {d})\n"
+            msg += f"- `{i}` {o['name']} {arrow} ({o['rank']} → {n['rank']})\n"
         messages.append(msg)
 
-    # SEND
+    # OUTPUT
     if messages:
-        send("\n".join(messages))
-        print("\n".join(messages))
+        final_report = "\n".join(messages)
+        send(final_report)
+        print("Changes detected and sent to Discord.")
+        # Only save state if there were changes to prevent redundant Git commits
+        save_state(current)
     else:
-        print("No changes detected")
-
-    save_state(current)
+        print("No changes detected in Top 1000.")
 
 
 if __name__ == "__main__":
