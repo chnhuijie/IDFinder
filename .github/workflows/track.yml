@@ -1,15 +1,15 @@
-name: Uma Roster Tracker
+name: Uma Top 500 Tracker
 
 on:
   schedule:
-    # Runs daily at 15:10 UTC (11:10 PM PH Time)
+    # Runs daily at 11:10 PM PH Time (15:10 UTC)
     - cron: '10 15 * * *'
-  workflow_dispatch: # Allows you to run it manually
+  workflow_dispatch: 
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    # Explicit timeout for the 1500-club/12-minute execution
+    # 30 minutes is a very safe buffer for a 500-club scan
     timeout-minutes: 30 
     
     permissions:
@@ -39,15 +39,13 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           
-          # Pull latest to avoid conflicts during the long run
           git pull origin main --rebase
           
           git add state/member_state.json
           
-          # Only commit if there is actual player movement
           if git diff --staged --quiet; then
             echo "No changes detected. Skipping commit."
           else
-            git commit -m "Update state: $(date +'%Y-%m-%d %H:%M')"
+            git commit -m "Update state: $(date +'%Y-%m-%d %H:%M') (Top 500)"
             git push origin main
           fi
