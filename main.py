@@ -9,7 +9,6 @@ import time
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE_DIR, "state", "member_state.json")
-# Updated to track 500 clubs
 MAX_CLUBS_TO_SCAN = 500 
 API_URL = "https://uma.moe/api/v4/circles"
 
@@ -45,23 +44,21 @@ def safe_get(url):
     try:
         response = requests.get(url, headers=HEADERS, timeout=15)
         
-        # Skip immediately if the club is gone (prevents retry loops on dead links)
         if response.status_code == 404:
-            print(f"Skipping: {url} (Not Found)")
+            print(f"   ! Skipping: {url} (Not Found)")
             return None
 
         if response.status_code == 429:
             wait = int(response.headers.get("Retry-After", 60))
-            # Cap wait time to prevent GitHub Action timeout
             wait = min(wait, 120) 
-            print(f"Throttled! Sleeping for {wait} seconds...")
+            print(f"   ! Throttled! Sleeping for {wait} seconds...")
             time.sleep(wait)
             return safe_get(url) 
 
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"Request failed: {url} -> {e}")
+        print(f"   ! Request failed: {url} -> {e}")
         return None
 
 # =========================
@@ -71,19 +68,22 @@ def get_top_members():
     all_players = {}
     circles = []
     
-    # 5 pages * 100 per page = Top 500
-    print("Step 1: Fetching 500 Circle IDs...")
+    print(">>> Step 1: Fetching 500 Circle IDs...")
     for page in range(5): 
         data = safe_get(f"{API_URL}/list?page={page}&limit=100&sort_by=rank&sort_dir=asc")
         if data and "circles" in data:
             circles.extend(data["circles"])
+            print(f"    Loaded page {page + 1}/5")
             time.sleep(0.6) 
         else: break
 
-    print(f"Step 2: Fetching rosters for {len(circles)} clubs...")
+    print(f"\n>>> Step 2: Fetching rosters for {len(circles)} clubs...")
     for idx, c in enumerate(circles):
         cid = c.get("circle_id")
         club_name = c.get("name")
+        
+        # LIVE PROGRESS: This prints to your GitHub Actions log immediately
+        print(f"[{idx + 1}/{len(circles)}] Scanning: {club_name}")
         
         detail = safe_get(f"{API_URL}/{cid}")
         if detail:
@@ -93,14 +93,10 @@ def get_top_members():
                     mid = str(m.get("id") or m.get("viewer_id"))
                     all_players[mid] = {"name": m.get("name"), "club": club_name}
             else:
-                # Fallback to leader if full roster is hidden
                 lid = str(c.get("leader_viewer_id"))
                 all_players[lid] = {"name": c.get("leader_name"), "club": club_name}
         
-        if (idx + 1) % 100 == 0:
-            print(f"Progress: {idx + 1}/{len(circles)} scanned...")
-        
-        # Polite delay to avoid IP flagging
+        # Polite delay
         time.sleep(0.7) 
 
     return all_players
@@ -113,13 +109,13 @@ def main():
     total_found = len(current_players)
     
     if total_found == 0:
-        print("CRITICAL: No data collected.")
+        print("\nCRITICAL: No data collected.")
         return
 
     previous = load_state()
     if not previous:
         save_state(current_players)
-        send_discord(f"📊 **Tracker Initialized**\nNow tracking {total_found} players in Top 500.")
+        send_discord(f"📊 **Tracker Initialized**\nTracking {total_found} players in Top 500.")
         return
 
     old_ids = set(previous.keys())
@@ -138,9 +134,9 @@ def main():
     if report:
         send_discord("\n\n".join(report))
         save_state(current_players)
-        print(f"Updates sent. Total tracked: {total_found}")
+        print(f"\nUpdates sent. Total tracked: {total_found}")
     else:
-        print("No movement detected.")
+        print("\nNo movement detected.")
 
 if __name__ == "__main__":
     main()
