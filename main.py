@@ -13,60 +13,139 @@ TOP_N = 1000
 API_URL = "https://uma.moe/api/v4/circles/list"
 
 # =========================
-# DIAGNOSTIC MAIN
+# STATE
+# =========================
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) and data else {}
+    except (json.JSONDecodeError, FileNotFoundError):
+        return {}
+
+def save_state(data):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+# =========================
+# DISCORD
+# =========================
+def send(msg):
+    if not WEBHOOK_URL:
+        print("No webhook set")
+        return
+    # Truncate to stay under Discord's 2000 character limit
+    requests.post(WEBHOOK_URL, json={"content": msg[:1990]})
+
+# =========================
+# FETCH & BUILD
+# =========================
+def fetch_all_circles():
+    circles = []
+    page = 0
+    limit = 100
+    MAX_PAGES = 15 # Top 1000 is usually within the first 10-15 pages
+
+    while page < MAX_PAGES:
+        url = f"{API_URL}?page={page}&limit={limit}&sort_by=rank&sort_dir=asc"
+        try:
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            batch = data.get("circles", [])
+            if not batch: break
+            circles.extend(batch)
+            if len(batch) < limit: break
+            page += 1
+        except Exception as e:
+            print(f"Fetch error: {e}")
+            break
+    return circles
+
+def build_members(circles):
+    members = {}
+    for c in circles:
+        club_name = c.get("name")
+        # Try to find the member list (API may use 'members' or 'leaderboard')
+        member_list = c.get("members", [])
+        
+        if isinstance(member_list, list):
+            for m in member_list:
+                mid = str(m.get("id"))
+                if mid and mid != "None":
+                    members[mid] = {
+                        "name": m.get("name"),
+                        "club": club_name,
+                        "rank": m.get("rank") if m.get("rank") is not None else 9999
+                    }
+    return members
+
+# =========================
+# DIFF ENGINE
+# =========================
+def diff(old, new):
+    joined, left, moved, rank_changes = [], [], [], []
+    old_ids, new_ids = set(old.keys()), set(new.keys())
+
+    for i in new_ids - old_ids: joined.append((i, new[i]))
+    for i in old_ids - new_ids: left.append((i, old[i]))
+    for i in old_ids & new_ids:
+        o, n = old[i], new[i]
+        if o["club"] != n["club"]: moved.append((i, o, n))
+        if o["rank"] < 9999 and n["rank"] < 9999:
+            d = o["rank"] - n["rank"]
+            if d != 0: rank_changes.append((i, o, n, d))
+    return joined, left, moved, rank_changes
+
+# =========================
+# MAIN
 # =========================
 def main():
-    print(f"--- DIAGNOSTIC RUN ---")
-    print(f"Checking Path: {STATE_FILE}")
+    print("Fetching data...")
+    circles = fetch_all_circles()
+    all_members = build_members(circles)
     
-    # 1. Test API
-    print("Fetching from API...")
-    try:
-        r = requests.get(f"{API_URL}?page=0&limit=100&sort_by=rank&sort_dir=asc", timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        raw_circles = data.get("circles", [])
-        print(f"API Success: Found {len(raw_circles)} circles on page 0")
-    except Exception as e:
-        print(f"API FAILURE: {e}")
+    print(f"Total unique members found: {len(all_members)}")
+    
+    if not all_members:
+        print("CRITICAL: No members found. Check API structure.")
         return
 
-    # 2. Test Member Building
-    members = {}
-    for c in raw_circles:
-        club_name = c.get("name")
-        for m in c.get("members", []):
-            mid = str(m.get("id"))
-            members[mid] = {"name": m.get("name"), "club": club_name, "rank": m.get("rank", 9999)}
-    
-    print(f"Member Build: Processed {len(members)} unique members from first page")
+    current = dict(sorted(all_members.items(), key=lambda x: x[1]["rank"])[:TOP_N])
+    previous = load_state()
 
-    # 3. Test State Loading
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
-            raw_content = f.read()
-            print(f"Current File Content: '{raw_content}'")
+    if not previous:
+        save_state(current)
+        send("📊 Initial Top 1000 snapshot saved.")
+        return
+
+    joined, left, moved, rank_changes = diff(previous, current)
+    messages = []
+
+    if joined:
+        msg = "🟢 **Entered Top 1000**\n"
+        for i, m in joined: msg += f"- `{i}` {m['name']} | {m['club']}\n"
+        messages.append(msg)
+
+    if left:
+        msg = "🔴 **Dropped out of Top 1000**\n"
+        for i, m in left: msg += f"- `{i}` {m['name']} | {m['club']}\n"
+        messages.append(msg)
+
+    if moved:
+        msg = "🟡 **Club Transfers**\n"
+        for i, o, n in moved: msg += f"- `{i}` {o['name']}: {o['club']} → {n['club']}\n"
+        messages.append(msg)
+
+    if messages:
+        send("\n".join(messages))
+        save_state(current)
+        print("Changes sent to Discord and state updated.")
     else:
-        print("State file does not exist yet.")
-
-    # 4. Attempt Write
-    print("Attempting to write 10 members for test...")
-    test_data = dict(list(members.items())[:10])
-    
-    try:
-        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(test_data, f, indent=2)
-        print("WRITE SUCCESSFUL")
-    except Exception as e:
-        print(f"WRITE FAILED: {e}")
-
-    # 5. Discord Heartbeat
-    if WEBHOOK_URL:
-        requests.post(WEBHOOK_URL, json={"content": "🛠 Diagnostic run complete. Check GitHub logs!"})
-        print("Discord notification sent.")
-    else:
-        print("No Webhook URL found in env.")
+        print("No changes detected.")
 
 if __name__ == "__main__":
     main()
