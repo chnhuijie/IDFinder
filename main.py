@@ -4,121 +4,74 @@ import time
 import random
 import logging
 import datetime
+import requests as discord_req
 from curl_cffi import requests
 from pymongo import MongoClient, UpdateOne
 
-# Logging configuration
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 MONGO_URI = os.getenv("MONGO_URI")
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 BASE_API = "https://uma.moe/api/v4/circles"
 
-# Persistent session to carry Cloudflare/Security cookies
 session = requests.Session()
 
-def safe_get(url):
-    """
-    Mimics a real Chrome browser. 
-    Uses jittered delays to keep your home IP safe from detection.
-    """
-    time.sleep(random.uniform(5.0, 10.0)) 
-    current_url = url.rstrip('/')
+def send_discord(title, entries):
+    if not DISCORD_WEBHOOK or not entries: return
+    content = f"**{title}**\n" + "\n".join(entries)
+    discord_req.post(DISCORD_WEBHOOK, json={"content": content})
 
+def safe_get(url):
+    time.sleep(random.uniform(5.0, 10.0)) 
     try:
-        res = session.get(
-            current_url, 
-            impersonate="chrome120", 
-            timeout=30,
-            headers={
-                "Host": "uma.moe",
-                "Connection": "keep-alive",
-                "Accept": "application/json, text/plain, */*",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "X-Requested-With": "XMLHttpRequest",
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Dest": "empty",
-                "Referer": "https://uma.moe/ranking",
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-        )
-        
-        if res.status_code == 200:
-            return res.json()
-        
-        if res.status_code == 404:
-            log.warning(f"404 Skip: {current_url}")
-            return None
-            
-        log.warning(f"Status {res.status_code} for {current_url}")
+        res = session.get(url.rstrip('/'), impersonate="chrome120", timeout=30)
+        if res.status_code == 200: return res.json()
     except Exception as e:
-        log.error(f"Error fetching {current_url}: {e}")
+        log.error(f"Error: {e}")
     return None
 
 def main(start, end):
     start, end = int(start), int(end)
+    now_dt = datetime.datetime.now()
+    curr_year, curr_month = now_dt.year, now_dt.month
     
-    # --- AUTOMATED DATE LOGIC ---
-    now = datetime.datetime.now()
-    curr_year = now.year
-    curr_month = now.month
-    log.info(f"Syncing for Date: {curr_year}-{curr_month:02d}")
-    
-    # --- SESSION WARM-UP ---
-    log.info("Warming up browser session...")
+    log.info("Warming up...")
     session.get("https://uma.moe/ranking", impersonate="chrome120")
-    time.sleep(3) 
     
-    # 1. Fetch Discovery List
-    list_url = f"{BASE_API}/list?page=0&limit=100&sort_by=rank&sort_dir=asc"
-    data = safe_get(list_url)
-    
-    if not data or "circles" not in data:
-        log.error("Could not fetch the top 100 list.")
-        return
+    data = safe_get(f"{BASE_API}/list?page=0&limit=100&sort_by=rank&sort_dir=asc")
+    if not data: return
 
-    all_clubs = data["circles"]
-    target = all_clubs[start:end]
-    
+    target = data["circles"][start:end]
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
     
-    log.info(f"Stealth Syncing Ranks {start+1} to {end} via MyPC")
-
+    joiners = []
     for club in target:
-        cid = club.get("circle_id")
-        name = club.get("name")
-        
-        # Using the updated query format you discovered
+        cid, name = club.get("circle_id"), club.get("name")
         club_url = f"{BASE_API}?circle_id={cid}&year={curr_year}&month={curr_month}"
         detail = safe_get(club_url)
         
         if detail and "members" in detail:
-            # FIX: Prioritize viewer_id (the 12-digit public ID) over internal id
             ops = []
             for m in (detail.get("members") or []):
-                # We try viewer_id first; if missing, we use id. 
-                public_id = str(m.get("viewer_id") or m.get("id"))
-                
+                p_id = str(m.get("viewer_id") or m.get("id"))
+                p_name = m.get("name", "Unknown")
+
+                if not db.find_one({"mid": p_id}):
+                    joiners.append(f"✅ {p_name} (`{p_id}`) -> **{name}**")
+
                 ops.append(UpdateOne(
-                    {"mid": public_id},
-                    {"$set": {
-                        "name": m.get("name"), 
-                        "club": name, 
-                        "last_seen": time.time()
-                    }},
+                    {"mid": p_id},
+                    {"$set": {"name": p_name, "club": name, "last_seen": time.time()}},
                     upsert=True
                 ))
-            
             if ops: 
                 db.bulk_write(ops, ordered=False)
                 log.info(f"Synced: {name}")
-        else:
-            log.info(f"Skipping {name} (No roster data)")
 
-    log.info(f"Batch {start+1}-{end} finished.")
+    if joiners:
+        send_discord("🆕 New Players Detected", joiners[:20]) # Limit to 20 per batch for Discord
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3:
-        main(sys.argv[1], sys.argv[2])
+    if len(sys.argv) == 3: main(sys.argv[1], sys.argv[2])
