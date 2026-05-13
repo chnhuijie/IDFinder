@@ -13,21 +13,24 @@ log = logging.getLogger(__name__)
 MONGO_URI = os.getenv("MONGO_URI")
 BASE_API = "https://uma.moe/api/v4/circles"
 
+# 1. ADD THIS AT THE VERY TOP (after your imports)
+# This creates a "persistent" connection that saves security cookies
+session = requests.Session()
+
 def safe_get(url):
     """
-    Fetches data using curl_cffi to mimic a real Chrome browser.
-    Uses residential-friendly delays to keep your IP safe.
+    Now uses the 'session' object to mimic a browser that stays open.
     """
-    # Jitter delay: Mimics a human scrolling and clicking (5-10 seconds)
-    time.sleep(random.uniform(5.0, 10.0)) 
+    # Human-like delay
+    time.sleep(random.uniform(8.0, 15.0)) 
     
-    # URL Normalization: Prevents 404s by adding a clean trailing slash and ref
     current_url = url
     if "/list" not in url: 
         current_url = f"{url}/?ref=web_{int(time.time())}"
 
     try:
-        res = requests.get(
+        # NOTICE: Changed from requests.get to session.get
+        res = session.get(
             current_url, 
             impersonate="chrome120", 
             timeout=30,
@@ -35,10 +38,6 @@ def safe_get(url):
                 "Referer": "https://uma.moe/ranking",
                 "Origin": "https://uma.moe",
                 "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Dest": "empty",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
         )
@@ -46,9 +45,8 @@ def safe_get(url):
         if res.status_code == 200:
             return res.json()
         
-        # If 404, the club likely disbanded or ID changed during reset
         if res.status_code == 404:
-            log.warning(f"404/Not Found (Club likely disbanded): {current_url}")
+            log.warning(f"404/Block Skip: {current_url}")
             return None
             
         log.warning(f"Status {res.status_code} for {current_url}")
@@ -59,14 +57,17 @@ def safe_get(url):
 def main(start, end):
     start, end = int(start), int(end)
     
-    # 1. Fetch the Top 100 Discovery List
+    # 2. THE "SECRET KEY": Warming up the session
+    # This hits the site to grab the security cookies needed for Eden/TouchGrass
+    log.info("Warming up browser session to bypass security checks...")
+    session.get("https://uma.moe/ranking", impersonate="chrome120")
+    time.sleep(5) 
+    
+    # 3. Now fetch the list using the session
     list_url = f"{BASE_API}/list?page=0&limit=100&sort_by=rank&sort_dir=asc"
     data = safe_get(list_url)
     
-    if not data or "circles" not in data:
-        log.error("Could not fetch the top 100 list. Site may be updating.")
-        return
-
+    # ... rest of your code
     all_clubs = data["circles"]
     target = all_clubs[start:end]
     
