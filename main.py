@@ -7,14 +7,14 @@ import datetime
 from curl_cffi import requests
 from pymongo import MongoClient, UpdateOne
 
-# Logging configuration for clear feedback in your PowerShell terminal
+# Logging configuration
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 MONGO_URI = os.getenv("MONGO_URI")
 BASE_API = "https://uma.moe/api/v4/circles"
 
-# Persistent session to carry Cloudflare/Security cookies like a real browser
+# Persistent session to carry Cloudflare/Security cookies
 session = requests.Session()
 
 def safe_get(url):
@@ -22,10 +22,7 @@ def safe_get(url):
     Mimics a real Chrome browser. 
     Uses jittered delays to keep your home IP safe from detection.
     """
-    # Human-like delay (5 to 10 seconds)
     time.sleep(random.uniform(5.0, 10.0)) 
-    
-    # Clean the URL to avoid picky API 404s
     current_url = url.rstrip('/')
 
     try:
@@ -51,7 +48,7 @@ def safe_get(url):
             return res.json()
         
         if res.status_code == 404:
-            log.warning(f"404 Skip: {current_url} (Check API params or if club disbanded)")
+            log.warning(f"404 Skip: {current_url}")
             return None
             
         log.warning(f"Status {res.status_code} for {current_url}")
@@ -69,7 +66,6 @@ def main(start, end):
     log.info(f"Syncing for Date: {curr_year}-{curr_month:02d}")
     
     # --- SESSION WARM-UP ---
-    # Hits the main page first to grab necessary security tokens
     log.info("Warming up browser session...")
     session.get("https://uma.moe/ranking", impersonate="chrome120")
     time.sleep(3) 
@@ -79,7 +75,7 @@ def main(start, end):
     data = safe_get(list_url)
     
     if not data or "circles" not in data:
-        log.error("Could not fetch the top 100 list. Site may be in maintenance.")
+        log.error("Could not fetch the top 100 list.")
         return
 
     all_clubs = data["circles"]
@@ -94,23 +90,32 @@ def main(start, end):
         cid = club.get("circle_id")
         name = club.get("name")
         
-        # Build the URL with the automated year/month parameters
+        # Using the updated query format you discovered
         club_url = f"{BASE_API}?circle_id={cid}&year={curr_year}&month={curr_month}"
         detail = safe_get(club_url)
         
         if detail and "members" in detail:
-            ops = [
-                UpdateOne(
-                    {"mid": str(m.get("id") or m.get("viewer_id"))},
-                    {"$set": {"name": m.get("name"), "club": name, "last_seen": time.time()}},
+            # FIX: Prioritize viewer_id (the 12-digit public ID) over internal id
+            ops = []
+            for m in (detail.get("members") or []):
+                # We try viewer_id first; if missing, we use id. 
+                public_id = str(m.get("viewer_id") or m.get("id"))
+                
+                ops.append(UpdateOne(
+                    {"mid": public_id},
+                    {"$set": {
+                        "name": m.get("name"), 
+                        "club": name, 
+                        "last_seen": time.time()
+                    }},
                     upsert=True
-                ) for m in (detail.get("members") or [])
-            ]
+                ))
+            
             if ops: 
                 db.bulk_write(ops, ordered=False)
                 log.info(f"Synced: {name}")
         else:
-            log.info(f"Skipping {name} (No roster data found)")
+            log.info(f"Skipping {name} (No roster data)")
 
     log.info(f"Batch {start+1}-{end} finished.")
 
