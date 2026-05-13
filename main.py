@@ -2,6 +2,7 @@ import requests
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 # =========================
 # CONFIG
@@ -9,17 +10,17 @@ import time
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE_DIR, "state", "member_state.json")
-MAX_CLUBS_TO_SCAN = 500 
 API_URL = "https://uma.moe/api/v4/circles"
-
+MAX_WORKERS = 5 # Number of simultaneous requests. Don't go too high or you'll get banned.
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
+session = requests.Session()
+session.headers.update(HEADERS)
 
 # STATE HELPERS
-
 def load_state():
     if not os.path.exists(STATE_FILE): return {}
     try:
@@ -34,109 +35,98 @@ def save_state(data):
 
 def send_discord(msg):
     if not WEBHOOK_URL or not msg: return
-    requests.post(WEBHOOK_URL, json={"content": msg[:1990]})
-
-
-# THROTTLING & ERROR PROTECTION
+    # Split message if it exceeds Discord's 2000 char limit
+    for chunk in [msg[i:i+1900] for i in range(0, len(msg), 1900)]:
+        session.post(WEBHOOK_URL, json={"content": chunk})
 
 def safe_get(url):
-    """Handles API throttling, 404s, and returns JSON or None."""
     try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
-        
-        if response.status_code == 404:
-            print(f"   ! Skipping: {url} (Not Found)")
-            return None
-
+        response = session.get(url, timeout=10)
         if response.status_code == 429:
-            wait = int(response.headers.get("Retry-After", 60))
-            wait = min(wait, 120) 
-            print(f"   ! Throttled! Sleeping for {wait} seconds...")
+            wait = int(response.headers.get("Retry-After", 30))
+            print(f"Throttled. Sleeping {wait}s...")
             time.sleep(wait)
-            return safe_get(url) 
-
-        response.raise_for_status()
+            return safe_get(url)
+        if response.status_code != 200: return None
         return response.json()
-    except Exception as e:
-        print(f"   ! Request failed: {url} -> {e}")
+    except Exception:
         return None
 
-
-# DATA FETCHING
+def fetch_roster(circle_data):
+    """Worker function for parallel execution"""
+    cid = circle_data.get("circle_id")
+    club_name = circle_data.get("name")
+    
+    detail = safe_get(f"{API_URL}/{cid}")
+    players = {}
+    
+    if detail:
+        members = detail.get("members") or []
+        if isinstance(members, list) and len(members) > 0:
+            for m in members:
+                mid = str(m.get("id") or m.get("viewer_id"))
+                players[mid] = {"name": m.get("name"), "club": club_name}
+        else:
+            lid = str(circle_data.get("leader_viewer_id"))
+            players[lid] = {"name": circle_data.get("leader_name"), "club": club_name}
+    
+    return players
 
 def get_top_members():
     all_players = {}
     circles = []
     
-    print(">>> Step 1: Fetching 500 Circle IDs...")
+    print(">>> Step 1: Fetching Circle IDs...")
     for page in range(5): 
         data = safe_get(f"{API_URL}/list?page={page}&limit=100&sort_by=rank&sort_dir=asc")
         if data and "circles" in data:
             circles.extend(data["circles"])
-            print(f"    Loaded page {page + 1}/5")
-            time.sleep(0.6) 
-        else: break
+        time.sleep(0.2) # Small buffer
 
-    print(f"\n>>> Step 2: Fetching rosters for {len(circles)} clubs...")
-    for idx, c in enumerate(circles):
-        cid = c.get("circle_id")
-        club_name = c.get("name")
-        
-        # LIVE PROGRESS: This prints to your GitHub Actions log immediately
-        print(f"[{idx + 1}/{len(circles)}] Scanning: {club_name}")
-        
-        detail = safe_get(f"{API_URL}/{cid}")
-        if detail:
-            members = detail.get("members") or []
-            if isinstance(members, list) and len(members) > 0:
-                for m in members:
-                    mid = str(m.get("id") or m.get("viewer_id"))
-                    all_players[mid] = {"name": m.get("name"), "club": club_name}
-            else:
-                lid = str(c.get("leader_viewer_id"))
-                all_players[lid] = {"name": c.get("leader_name"), "club": club_name}
-        
-        # Polite delay
-        time.sleep(0.7) 
+    print(f">>> Step 2: Fetching rosters for {len(circles)} clubs using {MAX_WORKERS} workers...")
+    
+    # Using ThreadPoolExecutor to run requests in parallel
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        results = list(executor.map(fetch_roster, circles))
+
+    for batch in results:
+        all_players.update(batch)
 
     return all_players
 
-
-# MAIN LOGIC
-
 def main():
+    start_time = time.time()
     current_players = get_top_members()
-    total_found = len(current_players)
     
-    if total_found == 0:
-        print("\nCRITICAL: No data collected.")
+    if not current_players:
+        print("No data collected.")
         return
 
     previous = load_state()
     if not previous:
         save_state(current_players)
-        send_discord(f"📊 **Tracker Initialized**\nTracking {total_found} players in Top 500.")
+        send_discord(f"📊 **Tracker Initialized**\nTracking {len(current_players)} players.")
         return
 
+    # Comparison Logic
     old_ids = set(previous.keys())
     new_ids = set(current_players.keys())
 
-    joined = [f"- `{i}` **{current_players[i]['name']}** ({current_players[i]['club']})" for i in (new_ids - old_ids)]
-    vanished = [f"- `{i}` **{previous[i]['name']}** (Last seen: {previous[i]['club']})" for i in (old_ids - new_ids)]
-    transfers = [f"- `{i}` **{current_players[i]['name']}**: {previous[i]['club']} → {current_players[i]['club']}" 
+    joined = [f"- **{current_players[i]['name']}** ({current_players[i]['club']})" for i in (new_ids - old_ids)]
+    vanished = [f"- **{previous[i]['name']}** (Last: {previous[i]['club']})" for i in (old_ids - new_ids)]
+    transfers = [f"- **{current_players[i]['name']}**: {previous[i]['club']} → {current_players[i]['club']}" 
                  for i in (old_ids & new_ids) if previous[i]["club"] != current_players[i]["club"]]
 
     report = []
-    if joined: report.append("🟢 **New Entries**\n" + "\n".join(joined[:15]))
-    if vanished: report.append("🔴 **Left Top 500 Entirely**\n" + "\n".join(vanished[:15]))
-    if transfers: report.append("🟡 **Club Transfers**\n" + "\n".join(transfers[:15]))
+    if joined: report.append("🟢 **New Entries**\n" + "\n".join(joined[:20]))
+    if vanished: report.append("🔴 **Left Top 500**\n" + "\n".join(vanished[:20]))
+    if transfers: report.append("🟡 **Club Transfers**\n" + "\n".join(transfers[:20]))
 
     if report:
         send_discord("\n\n".join(report))
         save_state(current_players)
-        print(f"\nUpdates sent. Total tracked: {total_found}")
-    else:
-        print("\nNo movement detected.")
+    
+    print(f"Finished in {round(time.time() - start_time, 2)} seconds.")
 
 if __name__ == "__main__":
     main()
