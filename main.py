@@ -10,6 +10,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 MONGO_URI = os.getenv("MONGO_URI")
+# UPDATED: Base API moved up one level to handle different endpoint structures
 BASE_API = "https://uma.moe/api/v4/circles"
 
 # Use a persistent session
@@ -19,7 +20,7 @@ def safe_get(url):
     # Jitter delay: 5-8 seconds
     time.sleep(random.uniform(5.0, 8.0)) 
     
-    # URL Tweak: Removing the trailing slash and ref for maximum compatibility
+    # Clean the URL
     current_url = url.rstrip('/')
 
     try:
@@ -61,7 +62,7 @@ def main(start, end):
     session.get("https://uma.moe/ranking", impersonate="chrome120")
     time.sleep(3) 
     
-    # 1. Fetch Discovery List
+    # 1. Fetch Discovery List (This still uses the /list endpoint)
     list_url = f"{BASE_API}/list?page=0&limit=100&sort_by=rank&sort_dir=asc"
     data = safe_get(list_url)
     
@@ -77,11 +78,18 @@ def main(start, end):
     
     log.info(f"Stealth Syncing Ranks {start+1} to {end} via MyPC")
 
+    # Get current year and month for the API query
+    curr_year = 2026
+    curr_month = 5
+
     for club in target:
         cid = club.get("circle_id")
         name = club.get("name")
-        # Direct ID request without extra slashes
-        club_url = f"{BASE_API}/{cid}"
+        
+        # UPDATED: Construct the URL using the parameters you discovered
+        # matches: https://uma.moe/api/v4/circles?circle_id=772781438&year=2026&month=5
+        club_url = f"{BASE_API}?circle_id={cid}&year={curr_year}&month={curr_month}"
+        
         detail = safe_get(club_url)
         
         if detail and "members" in detail:
@@ -90,13 +98,13 @@ def main(start, end):
                     {"mid": str(m.get("id") or m.get("viewer_id"))},
                     {"$set": {"name": m.get("name"), "club": name, "last_seen": time.time()}},
                     upsert=True
-                ) for m in (detail["members"] or [])
+                ) for m in (detail.get("members") or [])
             ]
             if ops: 
                 db.bulk_write(ops, ordered=False)
                 log.info(f"Synced: {name}")
         else:
-            log.info(f"Skipping {name} (Data unavailable)")
+            log.info(f"Skipping {name} (Data unavailable - check if month/year parameters are correct)")
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
