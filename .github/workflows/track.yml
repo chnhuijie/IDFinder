@@ -1,27 +1,23 @@
-name: Uma Tracker - Top 100
-
+name: Uma Tracker
 on:
   schedule:
-    - cron: '10 15 * * *' # Runs at 11:10 PM Manila Time (15:10 UTC)
-  workflow_dispatch:      # Allows you to click "Run Workflow" manually
+    - cron: '10 15 * * *' # 11:10 PM Manila Time
+  workflow_dispatch:      # Allows manual "Run Workflow"
 
 jobs:
   scrape:
-    # This tells GitHub to run the code on your PC, not their blocked servers
-    runs-on: self-hosted 
+    runs-on: self-hosted  # Targets your PC
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Stealth Sync
-        # We use 'python' directly since it's already on your PC
-        # Running Ranks 1 to 20 as a test
-        run: python main.py 0 20
+        # Using 'py' to bypass the Windows Path issues we saw
+        run: py main.py 0 20
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
 
-      - name: Cool Down
-        # Jitter to keep the residential IP reputation clean
-        run: |
-          python -c "import time, random; time.sleep(random.randint(60, 120))"
+      - name: Jitter Delay
+        # Keeps your residential IP reputation clean for the next run
+        run: py -c "import time, random; time.sleep(random.randint(30, 90))"
