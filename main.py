@@ -1,150 +1,41 @@
-import os
-import sys
-import time
-import random
-import logging
-import requests
-from pymongo import MongoClient, UpdateOne
+name: Uma Tracker Layer 1 Fix
 
-# =========================
-# LOGGING & CONFIG
-# =========================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()]
-)
-log = logging.getLogger(__name__)
+on:
+  schedule:
+    - cron: '10 15 * * *' # 11:10 PM PHT
+  workflow_dispatch:
 
-WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-MONGO_URI = os.getenv("MONGO_URI")
-DB_NAME = "uma_tracker"
-COLLECTION_NAME = "members"
-API_URL = "https://uma.moe/api/v4/circles"
-
-# =========================
-# CORE ENGINE
-# =========================
-_mongo_client = None
-
-def get_collection():
-    global _mongo_client
-    if _mongo_client is None:
-        _mongo_client = MongoClient(MONGO_URI)
-    return _mongo_client[DB_NAME][COLLECTION_NAME]
-
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Referer": "https://uma.moe/leaderboard"
-})
-
-def safe_get(url, retries=4):
-    """GET with exponential backoff and 404 Fast-Fail."""
-    for attempt in range(retries):
-        try:
-            # Human-like jitter
-            time.sleep(random.uniform(2.0, 5.0))
-            res = session.get(url, timeout=15)
-            
-            if res.status_code == 200:
-                return res.json()
-            
-            # CRITICAL FIX: Fast-fail on 404 to avoid Ghost Blocks
-            if res.status_code == 404:
-                log.warning(f"404 Not Found (Ghost Block?): {url}. Skipping.")
-                return None
-                
-            if res.status_code == 429:
-                wait = int(res.headers.get("Retry-After", 60))
-                log.warning(f"Rate limited. Waiting {wait}s...")
-                time.sleep(wait)
-            else:
-                backoff = 2 ** attempt
-                log.warning(f"HTTP {res.status_code}. Retrying in {backoff}s...")
-                time.sleep(backoff)
-        except Exception as e:
-            log.error(f"Request failed: {e}")
-    return None
-
-def send_webhook(content):
-    """Safe Discord delivery with chunking."""
-    if not WEBHOOK_URL or not content: return
-    chunks = [content[i:i+1900] for i in range(0, len(content), 1900)]
-    for chunk in chunks:
-        requests.post(WEBHOOK_URL, json={"content": chunk})
-
-# =========================
-# TRACKING LOGIC
-# =========================
-def run_tracker(start_idx, end_idx):
-    log.info(f">>> TRACK mode: circles {start_idx} to {end_idx}")
+jobs:
+  track:
+    runs-on: ubuntu-latest  # Fix: changed from 'runs-with'
+    strategy:
+      matrix:
+        # Reduced initial range to verify the fix works
+        range: ["0 300", "300 600", "600 900", "900 1200", "1200 1500"]
+      max-parallel: 1  # Sequential to avoid triggering firewalls
     
-    # Discovery: Fetching leaderboard IDs
-    all_circles = []
-    # Using limit=100 as confirmed by circles.rs
-    for p in range(15):
-        data = safe_get(f"{API_URL}/list?page={p}&limit=100&sort_by=rank&sort_dir=asc")
-        if data: all_circles.extend(data.get("circles", []))
-    
-    if not all_circles:
-        log.error("Failed to fetch leaderboard discovery.")
-        return
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    collection = get_collection()
-    # Load state for transfer alerts
-    previous_state = {doc["mid"]: doc for doc in collection.find({}, {"mid": 1, "club": 1, "name": 1})}
-    
-    target_range = all_circles[start_idx:end_idx]
-    current_batch = {}
-    transfers = []
+      - name: Set up Cloudflare WARP
+        uses: fscarmen/warp-on-actions@v1.4
+        with:
+          stack: dual # Provides both IPv4 and IPv6
 
-    for circle in target_range:
-        cid = circle.get("circle_id")
-        club_name = circle.get("name")
-        detail = safe_get(f"{API_URL}/{cid}")
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install requests pymongo dnspython
+
+      - name: Verify IP Change
+        run: curl -s https://api.ipify.org # This should show a Cloudflare IP, not Azure
         
-        if detail and "members" in detail:
-            for m in (detail["members"] or []):
-                mid = str(m.get("id") or m.get("viewer_id"))
-                info = {"name": m.get("name"), "club": club_name}
-                current_batch[mid] = info
-                
-                if mid in previous_state and previous_state[mid]["club"] != club_name:
-                    transfers.append(f"🔄 **{info['name']}**: {previous_state[mid]['club']} → {club_name} (`{mid}`)")
-
-    if transfers:
-        send_webhook(f"📊 **Transfers ({start_idx}-{end_idx})**\n" + "\n".join(transfers))
-
-    # Database Update
-    timestamp = time.time()
-    ops = [UpdateOne({"mid": mid}, {"$set": {**info, "last_seen": timestamp}}, upsert=True) 
-           for mid, info in current_batch.items()]
-    if ops:
-        result = collection.bulk_write(ops, ordered=False)
-        log.info(f"Batch {start_idx}-{end_idx} complete. Updated {len(ops)} members.")
-
-def cleanup():
-    """Removes stale players and reports vanished IDs."""
-    log.info(">>> Running cleanup...")
-    collection = get_collection()
-    cutoff = time.time() - 93600 # 26 hours
-    vanished = list(collection.find({"last_seen": {"$lt": cutoff}}))
-    
-    if vanished:
-        report = "🔴 **Vanished (Left Top 1500)**\n" + "\n".join(
-            [f"- **{m['name']}** (Last: {m['club']}) ID: `{m['mid']}`" for m in vanished[:30]]
-        )
-        send_webhook(report)
-        collection.delete_many({"last_seen": {"$lt": cutoff}})
-    log.info(f"Cleanup finished. Removed {len(vanished)} stale records.")
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        sys.exit(1)
-        
-    mode = sys.argv[1].upper()
-    if mode == "CLEANUP":
-        cleanup()
-    else:
-        run_tracker(int(sys.argv[1]), int(sys.argv[2]))
+      - name: Run Tracking Batch
+        run: python main.py ${{ matrix.range }}
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
