@@ -1,48 +1,55 @@
-name: Uma ID Tracker 1500
+name: Trainer tracker
 
 on:
-  workflow_dispatch: # Allows you to run it manually anytime
   schedule:
-    # 11:10 PM PHT is 15:10 UTC
+    # Runs at 15:10 UTC (11:10 PM PHT)
     - cron: '10 15 * * *'
+  workflow_dispatch: # Allows you to run it manually for testing
 
 jobs:
-  scrape:
-    runs-on: ubuntu-latest
+  track:
+    runs-with: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
-        include:
-          - {s: 0, e: 300}
-          - {s: 300, e: 600}
-          - {s: 600, e: 900}
-          - {s: 900, e: 1200}
-          - {s: 1200, e: 1500}
+        # Splits the 1500 IDs into 5 parallel batches
+        range: ["0 300", "300 600", "600 900", "900 1200", "1200 1500"]
+      max-parallel: 3 # Limits concurrency to avoid "Matrix Overload"
+    
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dependencies
+
+      - name: Install Dependencies
         run: pip install requests pymongo dnspython
-      - name: Run Scraper Job
+
+      - name: Run Tracking Batch
+        run: python main.py ${{ matrix.range }}
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           MONGO_URI: ${{ secrets.MONGO_URI }}
-        run: python main.py ${{ matrix.s }} ${{ matrix.e }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
   cleanup-and-report:
-    needs: scrape # Waits for all 5 scrapers to finish
+    needs: track # Ensures cleanup only runs AFTER all tracking is done
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dependencies
+
+      - name: Install Dependencies
         run: pip install requests pymongo dnspython
-      - name: Report and Prune Vanished Players
+
+      - name: Final Cleanup and Vanished Report
+        run: python main.py CLEANUP
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           MONGO_URI: ${{ secrets.MONGO_URI }}
-        run: python main.py CLEANUP 0
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
