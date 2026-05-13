@@ -2,7 +2,7 @@ name: Trainer Tracker
 
 on:
   schedule:
-    - cron: '10 15 * * *' # 12 AM Manila Time
+    - cron: '10 15 * * *' # 11:10 PM Manila Time
   workflow_dispatch:
 
 jobs:
