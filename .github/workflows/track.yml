@@ -20,7 +20,7 @@ jobs:
         run: py main.py ${{ matrix.range[0] }} ${{ matrix.range[1] }}
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
   cleanup_and_notify:
     needs: scrape
@@ -31,4 +31,4 @@ jobs:
         run: py notify.py
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
