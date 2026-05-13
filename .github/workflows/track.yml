@@ -8,7 +8,7 @@ on:
 
 jobs:
   track:
-    runs-with: ubuntu-latest
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         # Splits the 1500 IDs into 5 parallel batches
