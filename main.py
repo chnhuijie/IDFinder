@@ -6,7 +6,7 @@ from pymongo import MongoClient, UpdateOne
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-# Environment Variables - Updated to DISCORD_WEBHOOK_URL
+
 MONGO_URI = os.getenv("MONGO_URI")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 BASE_API = "https://uma.moe/api/v4/circles"
