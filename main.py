@@ -6,39 +6,38 @@ import logging
 from curl_cffi import requests
 from pymongo import MongoClient, UpdateOne
 
-# Set up logging for clear feedback in your PowerShell window
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 MONGO_URI = os.getenv("MONGO_URI")
 BASE_API = "https://uma.moe/api/v4/circles"
 
-# 1. ADD THIS AT THE VERY TOP (after your imports)
-# This creates a "persistent" connection that saves security cookies
+# Use a persistent session
 session = requests.Session()
 
 def safe_get(url):
-    """
-    Now uses the 'session' object to mimic a browser that stays open.
-    """
-    # Human-like delay
-    time.sleep(random.uniform(8.0, 15.0)) 
+    # Jitter delay: 5-8 seconds
+    time.sleep(random.uniform(5.0, 8.0)) 
     
-    current_url = url
-    if "/list" not in url: 
-        current_url = f"{url}/?ref=web_{int(time.time())}"
+    # URL Tweak: Removing the trailing slash and ref for maximum compatibility
+    current_url = url.rstrip('/')
 
     try:
-        # NOTICE: Changed from requests.get to session.get
         res = session.get(
             current_url, 
             impersonate="chrome120", 
             timeout=30,
             headers={
-                "Referer": "https://uma.moe/ranking",
-                "Origin": "https://uma.moe",
+                "Host": "uma.moe",
+                "Connection": "keep-alive",
                 "Accept": "application/json, text/plain, */*",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "X-Requested-With": "XMLHttpRequest",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Dest": "empty",
+                "Referer": "https://uma.moe/ranking",
+                "Accept-Language": "en-US,en;q=0.9",
             }
         )
         
@@ -57,17 +56,19 @@ def safe_get(url):
 def main(start, end):
     start, end = int(start), int(end)
     
-    # 2. THE "SECRET KEY": Warming up the session
-    # This hits the site to grab the security cookies needed for Eden/TouchGrass
-    log.info("Warming up browser session to bypass security checks...")
+    # WARM UP: Hit the main ranking page to establish the session
+    log.info("Warming up session on ranking page...")
     session.get("https://uma.moe/ranking", impersonate="chrome120")
-    time.sleep(5) 
+    time.sleep(3) 
     
-    # 3. Now fetch the list using the session
+    # 1. Fetch Discovery List
     list_url = f"{BASE_API}/list?page=0&limit=100&sort_by=rank&sort_dir=asc"
     data = safe_get(list_url)
     
-    # ... rest of your code
+    if not data or "circles" not in data:
+        log.error("Could not fetch the top 100 list.")
+        return
+
     all_clubs = data["circles"]
     target = all_clubs[start:end]
     
@@ -79,8 +80,7 @@ def main(start, end):
     for club in target:
         cid = club.get("circle_id")
         name = club.get("name")
-        
-        # Phase 2: Fetch specific club rosters
+        # Direct ID request without extra slashes
         club_url = f"{BASE_API}/{cid}"
         detail = safe_get(club_url)
         
@@ -94,11 +94,9 @@ def main(start, end):
             ]
             if ops: 
                 db.bulk_write(ops, ordered=False)
-                log.info(f"Successfully Synced: {name}")
+                log.info(f"Synced: {name}")
         else:
-            log.info(f"Skipping {name} (API returned no roster data)")
-
-    log.info(f"Batch {start+1}-{end} finished. Closing connection.")
+            log.info(f"Skipping {name} (Data unavailable)")
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
