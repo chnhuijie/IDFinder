@@ -1,33 +1,49 @@
-import os, time, requests
+import os, time, requests as discord_req
 from pymongo import MongoClient
 
 def check_exits():
-    client = MongoClient(os.getenv("MONGO_URI"))
+    # Environment Variables - Updated to DISCORD_WEBHOOK_URL
+    MONGO_URI = os.getenv("MONGO_URI")
+    DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+    
+    if not DISCORD_WEBHOOK_URL:
+        print("Error: DISCORD_WEBHOOK_URL not found in environment.")
+        return
+
+    client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
-    webhook = os.getenv("DISCORD_WEBHOOK")
     
-    # 1. Find anyone who wasn't updated in the last 1 hour
-    # This means they are no longer in ANY of the top 100 clubs
-    one_hour_ago = time.time() - 3600
-    leaver_cursor = db.find({"last_seen": {"$lt": one_hour_ago}})
+    cutoff_time = time.time() - 3600
+    exited_players = list(db.find({"last_seen": {"$lt": cutoff_time}}))
     
-    exit_list = []
-    to_delete = []
-    
-    for p in leaver_cursor:
-        exit_list.append(f"❌ {p['name']} (`{p['mid']}`) left **{p['club']}**")
-        to_delete.append(p["_id"])
+    if exited_players:
+        exit_msgs = []
+        ids_to_delete = []
+        
+        for p in exited_players:
+            name = p.get('name', 'Unknown')
+            mid = p.get('mid')
+            old_club = p.get('club', 'Top 100')
+            
+            exit_msgs.append(f"❌ **{name}** (`{mid}`) has left **{old_club}**")
+            ids_to_delete.append(p["_id"])
+        
+        for i in range(0, len(exit_msgs), 20):
+            chunk = exit_msgs[i : i + 20]
+            header = "🚫 **Scout Alert: Players no longer in Top 100**"
+            payload = {"content": f"{header}\n" + "\n".join(chunk)}
+            
+            try:
+                discord_req.post(DISCORD_WEBHOOK_URL, json=payload)
+                time.sleep(1.5) 
+            except Exception as e:
+                print(f"Failed to send exit alert: {e}")
 
-    # 2. Report the IDs to Discord
-    if exit_list:
-        for i in range(0, len(exit_list), 20):
-            chunk = exit_list[i:i+20]
-            header = "🚫 **Exit Alert: IDs no longer in Top 100**"
-            requests.post(webhook, json={"content": f"{header}\n" + "\n".join(chunk)})
-
-    # 3. Clean up the database so they don't get reported twice
-    if to_delete:
-        db.delete_many({"_id": {"$in": to_delete}})
+        if ids_to_delete:
+            db.delete_many({"_id": {"$in": ids_to_delete}})
+            print(f"Cleanup complete. Removed {len(ids_to_delete)} players.")
+    else:
+        print("No exits detected in this cycle.")
 
 if __name__ == "__main__":
     check_exits()
