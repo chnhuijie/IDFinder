@@ -1,65 +1,77 @@
-import os, sys, time, random, logging, datetime
+import os
+import sys
+import time
+import random
+import logging
+import datetime
 import requests as discord_req
 from curl_cffi import requests
 from pymongo import MongoClient, UpdateOne
 
-# ... [Keep your existing imports and session setup] ...
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger(__name__)
 
-def send_discord_summary(exits, shift_count, new_count):
-    if not DISCORD_WEBHOOK: return
-    
-    messages = []
-    
-    # 1. Newcomers (Count only)
-    if new_count > 0:
-        messages.append(f"🆕 **{new_count}** new players entered the Top 100.")
+MONGO_URI = os.getenv("MONGO_URI")
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
+BASE_API = "https://uma.moe/api/v4/circles"
 
-    # 2. Shifts (Count only)
-    if shift_count > 0:
-        messages.append(f"🔄 **{shift_count}** players moved between Top 100 clubs.")
+session = requests.Session()
 
-    # 3. Exits (IDs included)
-    if exits:
-        messages.append("🚫 **Players who exited the Top 100:**")
-        # Send Exit IDs in chunks of 20
-        for i in range(0, len(exits), 20):
-            chunk = exits[i : i + 20]
-            content = "\n".join(messages) + "\n" + "\n".join(chunk)
-            discord_req.post(DISCORD_WEBHOOK, json={"content": content})
-            messages = [] # Clear so we only send the header once
-    elif messages:
-        # If there are counts but no exits, just send the counts
-        discord_req.post(DISCORD_WEBHOOK, json={"content": "\n".join(messages)})
+def send_discord(title, entries):
+    if not DISCORD_WEBHOOK or not entries: return
+    content = f"**{title}**\n" + "\n".join(entries)
+    discord_req.post(DISCORD_WEBHOOK, json={"content": content})
+
+def safe_get(url):
+    time.sleep(random.uniform(5.0, 10.0)) 
+    try:
+        res = session.get(url.rstrip('/'), impersonate="chrome120", timeout=30)
+        if res.status_code == 200: return res.json()
+    except Exception as e:
+        log.error(f"Error: {e}")
+    return None
 
 def main(start, end):
-    # ... [Keep initial setup/API fetch logic] ...
+    start, end = int(start), int(end)
+    now_dt = datetime.datetime.now()
+    curr_year, curr_month = now_dt.year, now_dt.month
     
-    shift_count = 0
-    new_count = 0
-    exits = [] # This is now handled in notify.py, but we track counts here
+    log.info("Warming up...")
+    session.get("https://uma.moe/ranking", impersonate="chrome120")
+    
+    data = safe_get(f"{BASE_API}/list?page=0&limit=100&sort_by=rank&sort_dir=asc")
+    if not data: return
 
+    target = data["circles"][start:end]
+    client = MongoClient(MONGO_URI)
+    db = client["uma_tracker"]["members"]
+    
+    joiners = []
     for club in target:
-        # ... [API fetch detail logic] ...
+        cid, name = club.get("circle_id"), club.get("name")
+        club_url = f"{BASE_API}?circle_id={cid}&year={curr_year}&month={curr_month}"
+        detail = safe_get(club_url)
+        
         if detail and "members" in detail:
             ops = []
             for m in (detail.get("members") or []):
-                p_id = str(m.get("viewer_id") or m.get("id") or m.get("mid"))
-                p_name = m.get("name") or m.get("nickname") or "Unknown"
+                p_id = str(m.get("viewer_id") or m.get("id"))
+                p_name = m.get("name", "Unknown")
 
-                # Check previous state
-                prev_record = db.find_one({"mid": p_id})
-                
-                if not prev_record:
-                    new_count += 1
-                elif prev_record.get("club") != club_name:
-                    shift_count += 1
-                
+                if not db.find_one({"mid": p_id}):
+                    joiners.append(f"✅ {p_name} (`{p_id}`) -> **{name}**")
+
                 ops.append(UpdateOne(
                     {"mid": p_id},
-                    {"$set": {"name": p_name, "club": club_name, "last_seen": time.time()}},
+                    {"$set": {"name": p_name, "club": name, "last_seen": time.time()}},
                     upsert=True
                 ))
-            # ... [Bulk write logic] ...
+            if ops: 
+                db.bulk_write(ops, ordered=False)
+                log.info(f"Synced: {name}")
 
-    # Send the "Joiner/Shifter" summary
-    send_discord_summary([], shift_count, new_count)
+    if joiners:
+        send_discord("🆕 New Players Detected", joiners[:20]) # Limit to 20 per batch for Discord
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3: main(sys.argv[1], sys.argv[2])
