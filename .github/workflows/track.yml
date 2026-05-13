@@ -1,41 +1,48 @@
-name: IDFinder Scraper
+name: Uma ID Tracker 1500
 
 on:
-  workflow_dispatch: # Allows manual trigger
+  workflow_dispatch: # Allows you to run it manually anytime
   schedule:
-    - cron: '0 0 * * *' # Runs daily at midnight
+    # 11:10 PM PHT is 15:10 UTC
+    - cron: '10 15 * * *'
 
 jobs:
-  run-scraper:
+  scrape:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false # Keep other jobs running if one fails
+      fail-fast: false
       matrix:
         include:
-          - start: 0
-            end: 100
-          - start: 101
-            end: 200
-          - start: 201
-            end: 300
-          - start: 301
-            end: 400
-          - start: 401
-            end: 500
-
+          - {s: 0, e: 300}
+          - {s: 300, e: 600}
+          - {s: 600, e: 900}
+          - {s: 900, e: 1200}
+          - {s: 1200, e: 1500}
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install Dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run Scraper Matrix
+      - name: Install dependencies
+        run: pip install requests pymongo dnspython
+      - name: Run Scraper Job
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python main.py ${{ matrix.start }} ${{ matrix.end }}
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+        run: python main.py ${{ matrix.s }} ${{ matrix.e }}
+
+  cleanup-and-report:
+    needs: scrape # Waits for all 5 scrapers to finish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install requests pymongo dnspython
+      - name: Report and Prune Vanished Players
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+        run: python main.py CLEANUP 0
