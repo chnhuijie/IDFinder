@@ -2,7 +2,7 @@ import os, time, requests as discord_req
 from pymongo import MongoClient
 
 def check_exits():
-    # Environment Variables - Updated to DISCORD_WEBHOOK_URL
+    
     MONGO_URI = os.getenv("MONGO_URI")
     DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
     
