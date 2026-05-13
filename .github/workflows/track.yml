@@ -2,7 +2,7 @@ name: Uma Tracker - Top 100 (20-Block Stealth)
 
 on:
   schedule:
-    - cron: '30 15 * * *' # 11:30 PM PHT
+    - cron: '10 15 * * *' # 11:10 PM PHT
   workflow_dispatch:
 
 jobs:
