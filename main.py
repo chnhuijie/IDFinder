@@ -13,8 +13,8 @@ MONGO_URI = os.getenv("MONGO_URI")
 API_URL = "https://uma.moe/api/v4/circles"
 
 def safe_get(url):
-    # Jitter to mimic human reading time (10-15s per club)
-    time.sleep(random.uniform(10.0, 15.0)) 
+    # Balanced jitter: 8-14s mimics a human reading the club info
+    time.sleep(random.uniform(8.0, 14.0)) 
     try:
         res = requests.get(url, impersonate="chrome120", timeout=30)
         if res.status_code == 200: return res.json()
@@ -25,18 +25,17 @@ def safe_get(url):
 
 def main(start, end):
     start, end = int(start), int(end)
-    # Fetch Top 100 list
     data = safe_get(f"{API_URL}/list?page=0&limit=100&sort_by=rank&sort_dir=asc")
     
     if not data or "circles" not in data:
-        log.error("Failed to fetch initial list. Check connection/WARP.")
+        log.error("Failed to fetch initial list.")
         return
 
     target = data["circles"][start:end]
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
     
-    log.info(f"Scraping Ranks {start+1} to {end}")
+    log.info(f"Syncing Ranks {start+1} to {end}")
 
     for club in target:
         cid = club.get("circle_id")
@@ -44,7 +43,6 @@ def main(start, end):
         detail = safe_get(f"{API_URL}/{cid}")
         
         if detail and "members" in detail:
-            # Syncing member IDs to MongoDB
             ops = [
                 UpdateOne(
                     {"mid": str(m.get("id") or m.get("viewer_id"))},
@@ -54,11 +52,11 @@ def main(start, end):
             ]
             if ops: 
                 db.bulk_write(ops, ordered=False)
-                log.info(f"Successfully synced: {name}")
+                log.info(f"Updated: {name}")
 
-    # 3-Minute Interval Cooldown
-    log.info("Batch finished. Sleeping 3 mins for stealth...")
-    time.sleep(180) 
+    # 2-Minute Interval Cooldown
+    log.info("Batch finished. Sleeping 120 seconds...")
+    time.sleep(120) 
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
