@@ -12,14 +12,14 @@ STATE_FILE = os.path.join(BASE_DIR, "state", "member_state.json")
 MAX_CLUBS_TO_SCAN = 500 
 API_URL = "https://uma.moe/api/v4/circles"
 
-# Mimic a real browser to help avoid shadow blocking
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-# =========================
+
 # STATE HELPERS
-# =========================
+
 def load_state():
     if not os.path.exists(STATE_FILE): return {}
     try:
@@ -36,9 +36,9 @@ def send_discord(msg):
     if not WEBHOOK_URL or not msg: return
     requests.post(WEBHOOK_URL, json={"content": msg[:1990]})
 
-# =========================
+
 # THROTTLING & ERROR PROTECTION
-# =========================
+
 def safe_get(url):
     """Handles API throttling, 404s, and returns JSON or None."""
     try:
@@ -61,9 +61,9 @@ def safe_get(url):
         print(f"   ! Request failed: {url} -> {e}")
         return None
 
-# =========================
+
 # DATA FETCHING
-# =========================
+
 def get_top_members():
     all_players = {}
     circles = []
@@ -101,9 +101,9 @@ def get_top_members():
 
     return all_players
 
-# =========================
+
 # MAIN LOGIC
-# =========================
+
 def main():
     current_players = get_top_members()
     total_found = len(current_players)
