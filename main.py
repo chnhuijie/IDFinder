@@ -3,24 +3,29 @@ import sys
 import time
 import random
 import logging
+import datetime
 from curl_cffi import requests
 from pymongo import MongoClient, UpdateOne
 
+# Logging configuration for clear feedback in your PowerShell terminal
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 MONGO_URI = os.getenv("MONGO_URI")
-# UPDATED: Base API moved up one level to handle different endpoint structures
 BASE_API = "https://uma.moe/api/v4/circles"
 
-# Use a persistent session
+# Persistent session to carry Cloudflare/Security cookies like a real browser
 session = requests.Session()
 
 def safe_get(url):
-    # Jitter delay: 5-8 seconds
-    time.sleep(random.uniform(5.0, 8.0)) 
+    """
+    Mimics a real Chrome browser. 
+    Uses jittered delays to keep your home IP safe from detection.
+    """
+    # Human-like delay (5 to 10 seconds)
+    time.sleep(random.uniform(5.0, 10.0)) 
     
-    # Clean the URL
+    # Clean the URL to avoid picky API 404s
     current_url = url.rstrip('/')
 
     try:
@@ -46,7 +51,7 @@ def safe_get(url):
             return res.json()
         
         if res.status_code == 404:
-            log.warning(f"404/Block Skip: {current_url}")
+            log.warning(f"404 Skip: {current_url} (Check API params or if club disbanded)")
             return None
             
         log.warning(f"Status {res.status_code} for {current_url}")
@@ -57,17 +62,24 @@ def safe_get(url):
 def main(start, end):
     start, end = int(start), int(end)
     
-    # WARM UP: Hit the main ranking page to establish the session
-    log.info("Warming up session on ranking page...")
+    # --- AUTOMATED DATE LOGIC ---
+    now = datetime.datetime.now()
+    curr_year = now.year
+    curr_month = now.month
+    log.info(f"Syncing for Date: {curr_year}-{curr_month:02d}")
+    
+    # --- SESSION WARM-UP ---
+    # Hits the main page first to grab necessary security tokens
+    log.info("Warming up browser session...")
     session.get("https://uma.moe/ranking", impersonate="chrome120")
     time.sleep(3) 
     
-    # 1. Fetch Discovery List (This still uses the /list endpoint)
+    # 1. Fetch Discovery List
     list_url = f"{BASE_API}/list?page=0&limit=100&sort_by=rank&sort_dir=asc"
     data = safe_get(list_url)
     
     if not data or "circles" not in data:
-        log.error("Could not fetch the top 100 list.")
+        log.error("Could not fetch the top 100 list. Site may be in maintenance.")
         return
 
     all_clubs = data["circles"]
@@ -78,18 +90,12 @@ def main(start, end):
     
     log.info(f"Stealth Syncing Ranks {start+1} to {end} via MyPC")
 
-    # Get current year and month for the API query
-    curr_year = 2026
-    curr_month = 5
-
     for club in target:
         cid = club.get("circle_id")
         name = club.get("name")
         
-        # UPDATED: Construct the URL using the parameters you discovered
-        # matches: https://uma.moe/api/v4/circles?circle_id=772781438&year=2026&month=5
+        # Build the URL with the automated year/month parameters
         club_url = f"{BASE_API}?circle_id={cid}&year={curr_year}&month={curr_month}"
-        
         detail = safe_get(club_url)
         
         if detail and "members" in detail:
@@ -104,7 +110,9 @@ def main(start, end):
                 db.bulk_write(ops, ordered=False)
                 log.info(f"Synced: {name}")
         else:
-            log.info(f"Skipping {name} (Data unavailable - check if month/year parameters are correct)")
+            log.info(f"Skipping {name} (No roster data found)")
+
+    log.info(f"Batch {start+1}-{end} finished.")
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
