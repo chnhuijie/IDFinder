@@ -1,51 +1,41 @@
-name: Uma Top 500 Tracker
+name: IDFinder Scraper
 
 on:
+  workflow_dispatch: # Allows manual trigger
   schedule:
-    # Runs daily at 11:10 PM PH Time (15:10 UTC)
-    - cron: '10 15 * * *'
-  workflow_dispatch: 
+    - cron: '0 0 * * *' # Runs daily at midnight
 
 jobs:
-  run:
+  run-scraper:
     runs-on: ubuntu-latest
-    # 30 minutes is a very safe buffer for a 500-club scan
-    timeout-minutes: 30 
-    
-    permissions:
-      contents: write
+    strategy:
+      fail-fast: false # Keep other jobs running if one fails
+      matrix:
+        include:
+          - start: 0
+            end: 100
+          - start: 101
+            end: 200
+          - start: 201
+            end: 300
+          - start: 301
+            end: 400
+          - start: 401
+            end: 500
 
     steps:
-      - name: Checkout repo
+      - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      - name: Run tracker
+      - name: Run Scraper Matrix
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python main.py
-
-      - name: Commit and Push changes
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          
-          git pull origin main --rebase
-          
-          git add state/member_state.json
-          
-          if git diff --staged --quiet; then
-            echo "No changes detected. Skipping commit."
-          else
-            git commit -m "Update state: $(date +'%Y-%m-%d %H:%M') (Top 500)"
-            git push origin main
-          fi
+        run: python main.py ${{ matrix.start }} ${{ matrix.end }}
