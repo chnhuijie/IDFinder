@@ -1,23 +1,29 @@
-name: Uma Tracker
+name: Torena Tracker
+
 on:
   schedule:
-    - cron: '10 15 * * *' # 11:10 PM Manila Time
-  workflow_dispatch:      # Allows manual "Run Workflow"
+    - cron: '10 15 * * *' # Runs daily
+  workflow_dispatch:
 
 jobs:
   scrape:
-    runs-on: self-hosted  # Targets your PC
+    runs-on: self-hosted
+    strategy:
+      max-parallel: 1 # CRITICAL: Runs one batch at a time so your IP isn't overwhelmed
+      matrix:
+        # This defines the [start, end] for each batch
+        range: [[0, 20], [20, 40], [40, 60], [60, 80], [80, 100]]
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Stealth Sync
-        # Using 'py' to bypass the Windows Path issues we saw
-        run: py main.py 0 20
+      - name: Sync Batch
+        # Accesses the specific range for this batch
+        run: py main.py ${{ matrix.range[0] }} ${{ matrix.range[1] }}
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
 
-      - name: Jitter Delay
-        # Keeps your residential IP reputation clean for the next run
-        run: py -c "import time, random; time.sleep(random.randint(30, 90))"
+      - name: Cool Down
+        # Wait 2 minutes between batches to let your home IP "rest"
+        run: py -c "import time; time.sleep(120)"
