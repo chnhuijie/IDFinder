@@ -1,19 +1,17 @@
-name: Trainer tracker
+name: Uma Tracker Daily Run
 
 on:
   schedule:
-    # Runs at 15:10 UTC (11:10 PM PHT)
-    - cron: '10 15 * * *'
-  workflow_dispatch: # Allows you to run it manually for testing
+    - cron: '10 15 * * *' # 11:10 PM PHT
+  workflow_dispatch:
 
 jobs:
   track:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # FIXED PROPERTY
     strategy:
       matrix:
-        # Splits the 1500 IDs into 5 parallel batches
         range: ["0 300", "300 600", "600 900", "900 1200", "1200 1500"]
-      max-parallel: 3 # Limits concurrency to avoid "Matrix Overload"
+      max-parallel: 1  # STAGGERED TO AVOID GHOST BLOCK
     
     steps:
       - name: Checkout Code
@@ -34,7 +32,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
   cleanup-and-report:
-    needs: track # Ensures cleanup only runs AFTER all tracking is done
+    needs: track
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -48,7 +46,7 @@ jobs:
       - name: Install Dependencies
         run: pip install requests pymongo dnspython
 
-      - name: Final Cleanup and Vanished Report
+      - name: Final Cleanup
         run: python main.py CLEANUP
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
