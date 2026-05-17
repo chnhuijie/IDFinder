@@ -21,6 +21,10 @@ jobs:
         with:
           python-version: '3.11'
 
+      #Installs required external libraries for the scraping job environment
+      - name: Install Python Dependencies
+        run: pip install pymongo curl_cffi requests
+
       - name: Add Human Jitter Delay
         shell: cmd # Bypasses PowerShell ExecutionPolicy restrictions completely on all PCs
         if: matrix.range[0] == 0
@@ -43,6 +47,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          
+      # Installs required external libraries for the notification and cleanup environment
+      - name: Install Python Dependencies
+        run: pip install pymongo requests
       
       - name: Final Leaver Check
         run: python notify.py
