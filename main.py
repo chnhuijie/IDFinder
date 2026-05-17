@@ -12,8 +12,31 @@ BASE_API = "https://uma.moe/api/v4/circles"
 
 session = requests.Session()
 
+def send_summary(new_count, shift_count, new_clubs_dict, shift_clubs_dict):
+    """Sends a breakdown of exactly which clubs experienced player movements."""
+    if not DISCORD_WEBHOOK_URL: return
+    messages = []
+    
+    if new_count > 0:
+        messages.append(f"🆕 **{new_count}** new players entered the tracking pool.")
+        # Add a bulleted list of clubs and how many players joined them
+        for club, count in new_clubs_dict.items():
+            messages.append(f"  • **{club}**: +{count} new player(s)")
+            
+    if shift_count > 0:
+        messages.append(f"\n🔄 **{shift_count}** players moved between tracked clubs.")
+        # Add a bulleted list of clubs that received transferring players
+        for club, count in shift_clubs_dict.items():
+            messages.append(f"  • **{club}**: +{count} transferred player(s)")
+    
+    if messages:
+        try:
+            # Join into a single clean message block
+            discord_req.post(DISCORD_WEBHOOK_URL, json={"content": "\n".join(messages)})
+        except Exception as e:
+            log.error(f"Discord error: {e}")
+
 def send_movement_alert(message):
-    """Dispatches precise entry/exit alerts to Discord."""
     if not DISCORD_WEBHOOK_URL or not message: return
     try:
         discord_req.post(DISCORD_WEBHOOK_URL, json={"content": message})
@@ -37,7 +60,6 @@ def main(start, end):
     log.info(f"--- Starting Sync: Range {start} to {end} ---")
     session.get("https://uma.moe/ranking", impersonate="chrome120")
     
-    # Fetching expanded list to accommodate up to 200 items smoothly
     data = safe_get(f"{BASE_API}/list?page=0&limit=200&sort_by=rank&sort_dir=asc")
     if not data or "circles" not in data: 
         log.error("Failed to fetch leaderboard list.")
@@ -46,27 +68,27 @@ def main(start, end):
     target_clubs = data["circles"][start:end]
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
-    
-    # Context cache for tracking club rank state changes
     club_rank_collection = client["uma_tracker"]["clubs"]
     
+    new_count = 0
+    shift_count = 0
+    
+    # Dictionaries to track which clubs are getting the movements
+    new_clubs_dict = {}
+    shift_clubs_dict = {}
+    
     for index, club in enumerate(target_clubs):
-        # Calculate true absolute rank position on the overall leaderboard
         absolute_club_rank = start + index 
         cid, club_name = club.get("circle_id"), club.get("name")
         
-        # Determine movement dynamics
         prev_club_state = club_rank_collection.find_one({"circle_id": cid})
         if prev_club_state:
             prev_rank = prev_club_state.get("last_known_rank", 999)
-            
-            # Entry/Exit Detection Rules
             if prev_rank >= 100 and absolute_club_rank < 100:
                 send_movement_alert(f"🚀 **{club_name}** has entered the **Top 100**! (Rank {absolute_club_rank + 1})")
             elif prev_rank < 100 and absolute_club_rank >= 100:
                 send_movement_alert(f"📉 **{club_name}** has dropped out of the **Top 100** into the Top 200. (Rank {absolute_club_rank + 1})")
         
-        # Update persistent club ranking metrics
         club_rank_collection.update_one(
             {"circle_id": cid},
             {"$set": {"name": club_name, "last_known_rank": absolute_club_rank, "last_updated": time.time()}},
@@ -82,6 +104,17 @@ def main(start, end):
                 p_id = str(m.get("viewer_id") or m.get("id"))
                 p_name = m.get("name") or m.get("nickname") or "Unknown"
 
+                prev_record = db.find_one({"mid": p_id})
+                
+                if not prev_record:
+                    new_count += 1
+                    # Tally new player to this specific club
+                    new_clubs_dict[club_name] = new_clubs_dict.get(club_name, 0) + 1
+                elif prev_record.get("club") != club_name:
+                    shift_count += 1
+                    # Tally transferring player to this target club
+                    shift_clubs_dict[club_name] = shift_clubs_dict.get(club_name, 0) + 1
+
                 ops.append(UpdateOne(
                     {"mid": p_id},
                     {"$set": {
@@ -96,6 +129,9 @@ def main(start, end):
             if ops: 
                 db.bulk_write(ops, ordered=False)
                 log.info(f"Successfully Synced: {club_name} (Rank {absolute_club_rank + 1})")
+
+    # Send the final aggregated summary with the club names included
+    send_summary(new_count, shift_count, new_clubs_dict, shift_clubs_dict)
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
