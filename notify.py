@@ -11,47 +11,66 @@ def check_exits():
 
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
+    club_db = client["uma_tracker"]["clubs"]
     
-    # ⏱️ 2-Hour Window Fix: 2 hours = 7200 seconds.
-    # Anyone who hasn't been scanned in 2 hours is verified as a true leaver.
+    # 2-Hour Time Window
     cutoff_time = time.time() - 7200
     
+    # Evaluate global leaderboard exits by verifying club listings
+    active_clubs = list(club_db.find({}))
+    active_club_names = {c["name"] for c in active_clubs}
+    
+    # 1. Process Individual Missing Flags
     exited_players = list(db.find({"last_seen": {"$lt": cutoff_time}}))
     
     if exited_players:
-        id_list = []
-        ids_to_delete = []
+        top_100_leavers = []
+        top_200_leavers = []
+        ids_to_purge = []
         
         for p in exited_players:
             mid = p.get('mid')
-            if mid:
-                id_list.append(str(mid))
-            ids_to_delete.append(p["_id"])
-        
-        # Format the IDs into a clean, vertical newline list
-        formatted_ids = "\n".join(id_list)
-        
-        # Construct payload with just the raw code block data you requested
-        payload = {
-            "username": "Leaderboard Tracker Bot",
-            "content": f"**❌ LEAVER IDs DETECTED (Dropped out of Top 200):**\n```text\n{formatted_ids}\n```"
-        }
-        
-        try:
-            res = discord_req.post(DISCORD_WEBHOOK_URL, json=payload)
-            if res.status_code == 204:
-                print("✅ Leaver IDs successfully sent to Discord!")
-            else:
-                print(f"⚠️ Discord returned an error status: {res.status_code}")
-        except Exception as e:
-            print(f"Failed to send exit alert: {e}")
+            tier = p.get('club_tier', 'Top 100')
+            old_club = p.get('club', 'Unknown')
+            
+            # Evaluate if the club dropped out of the Top 200 completely
+            if old_club not in active_club_names:
+                if tier == "Top 100":
+                    top_100_leavers.append(str(mid))
+                else:
+                    top_200_leavers.append(str(mid))
+            ids_to_purge.append(p["_id"])
 
-        # Clean old leavers out of your database collection automatically
-        if ids_to_delete:
-            db.delete_many({"_id": {"$in": ids_to_delete}})
-            print(f"Cleanup complete. Removed {len(ids_to_delete)} old leaver records from cloud database.")
-    else:
-        print("✅ No exits detected in this safety cycle.")
+        # Send structured alerts depending on tier origin
+        if top_100_leavers:
+            msg = "**❌ LEAVER IDs DETECTED (Dropped out of Top 100):**\n```text\n" + "\n".join(top_100_leavers) + "\n```"
+            discord_req.post(DISCORD_WEBHOOK_URL, json={"content": msg})
+            
+        if top_200_leavers:
+            msg = "**❌ LEAVER IDs DETECTED (Dropped out of Top 200):**\n```text\n" + "\n".join(top_200_leavers) + "\n```"
+            discord_req.post(DISCORD_WEBHOOK_URL, json={"content": msg})
+
+        if ids_to_purge:
+            db.delete_many({"_id": {"$in": ids_to_purge}})
+
+    # 2. Process Your "25 or More" Roster Threshold Rule
+    for club in active_clubs:
+        c_name = club.get("name")
+        c_rank = club.get("last_known_rank", 999)
+        
+        # Count current verified members checked in during tonight's loop
+        active_member_count = db.count_documents({"club": c_name, "last_seen": {"$gte": cutoff_time}})
+        
+        # If roster drops below your critical limit
+        if active_member_count > 0 and active_member_count < 25:
+            tier_label = "Top 100" if c_rank < 100 else "Top 200"
+            alert_payload = {
+                "content": f"⚠️ **Critical Threshold Alert:** Club **{c_name}** ({tier_label}, Rank {c_rank + 1}) has dropped below your threshold with only **{active_member_count}** active tracked members!"
+            }
+            try:
+                discord_req.post(DISCORD_WEBHOOK_URL, json=alert_payload)
+            except Exception as e:
+                print(f"Failed to post threshold warning: {e}")
 
 if __name__ == "__main__":
     check_exits()
