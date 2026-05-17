@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      #Installs required external libraries for the scraping job environment
+      # Installs required external libraries for the scraping job environment
       - name: Install Python Dependencies
         run: pip install pymongo curl_cffi requests
 
@@ -33,8 +33,7 @@ jobs:
       - name: Sync Batch
         run: python main.py ${{ matrix.range[0] }} ${{ matrix.range[1] }} 
         env:
-          MONGO_URI: ${{ secrets.MONGO_URI }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          MONGO_URI: ${{ secrets.MONGO_URI }} # 🟢 main.py runs silently now (Webhook reference removed here)
 
   cleanup_and_notify:
     needs: scrape
@@ -52,8 +51,8 @@ jobs:
       - name: Install Python Dependencies
         run: pip install pymongo requests
       
-      - name: Final Leaver Check
+      - name: Final Leaver Check and Transfer Analysis
         run: python notify.py
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }} # 🟢 Feeds the webhook to notify.py for the final consolidated report
