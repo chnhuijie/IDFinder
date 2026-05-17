@@ -2,7 +2,6 @@ name: Trainer Tracker
 
 on:
   schedule:
-    # 11:10 PM Manila Time (15:10 UTC)
     - cron: '10 15 * * *' 
   workflow_dispatch:
 
@@ -17,13 +16,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Add Human Jitter Delay
         shell: cmd # Bypasses PowerShell ExecutionPolicy restrictions completely on all PCs
         if: matrix.range[0] == 0
         run: python -c "import time, random; delay = random.randint(43, 378); print(f'Sleeping for {delay}s...'); time.sleep(delay)"
 
       - name: Sync Batch
-        run: python main.py ${{ matrix.range[0] }} ${{ matrix.range[1] }} # Uses standard python identifier
+        run: python main.py ${{ matrix.range[0] }} ${{ matrix.range[1] }} 
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -35,8 +39,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
       - name: Final Leaver Check
-        run: python notify.py # Uses standard python identifier
+        run: python notify.py
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
