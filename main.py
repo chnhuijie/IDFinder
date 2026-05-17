@@ -19,19 +19,16 @@ def send_summary(new_count, shift_count, new_clubs_dict, shift_clubs_dict):
     
     if new_count > 0:
         messages.append(f"🆕 **{new_count}** new players entered the tracking pool.")
-        # Add a bulleted list of clubs and how many players joined them
         for club, count in new_clubs_dict.items():
             messages.append(f"  • **{club}**: +{count} new player(s)")
             
     if shift_count > 0:
         messages.append(f"\n🔄 **{shift_count}** players moved between tracked clubs.")
-        # Add a bulleted list of clubs that received transferring players
         for club, count in shift_clubs_dict.items():
             messages.append(f"  • **{club}**: +{count} transferred player(s)")
     
     if messages:
         try:
-            # Join into a single clean message block
             discord_req.post(DISCORD_WEBHOOK_URL, json={"content": "\n".join(messages)})
         except Exception as e:
             log.error(f"Discord error: {e}")
@@ -60,20 +57,29 @@ def main(start, end):
     log.info(f"--- Starting Sync: Range {start} to {end} ---")
     session.get("https://uma.moe/ranking", impersonate="chrome120")
     
-    data = safe_get(f"{BASE_API}/list?page=0&limit=200&sort_by=rank&sort_dir=asc")
+    # 🟢 DYNAMIC PAGE RESOLUTION
+    # Ranks 0-99 map to page=0. Ranks 100-199 map to page=1.
+    api_page = 0 if start < 100 else 1
+    
+    # Normalize our matrix slices to match a 0-100 index scale per page array
+    api_start = start if api_page == 0 else (start - 100)
+    api_end = end if api_page == 0 else (end - 100)
+    
+    # Request the target page with the standard 100 limit the API expects natively
+    url = f"{BASE_API}/list?page={api_page}&limit=100&sort_by=rank&sort_dir=asc"
+    data = safe_get(url)
+    
     if not data or "circles" not in data: 
-        log.error("Failed to fetch leaderboard list.")
+        log.error(f"Failed to fetch leaderboard list for page {api_page}.")
         return
 
-    target_clubs = data["circles"][start:end]
+    target_clubs = data["circles"][api_start:api_end]
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
     club_rank_collection = client["uma_tracker"]["clubs"]
     
     new_count = 0
     shift_count = 0
-    
-    # Dictionaries to track which clubs are getting the movements
     new_clubs_dict = {}
     shift_clubs_dict = {}
     
@@ -108,11 +114,9 @@ def main(start, end):
                 
                 if not prev_record:
                     new_count += 1
-                    # Tally new player to this specific club
                     new_clubs_dict[club_name] = new_clubs_dict.get(club_name, 0) + 1
                 elif prev_record.get("club") != club_name:
                     shift_count += 1
-                    # Tally transferring player to this target club
                     shift_clubs_dict[club_name] = shift_clubs_dict.get(club_name, 0) + 1
 
                 ops.append(UpdateOne(
@@ -130,7 +134,6 @@ def main(start, end):
                 db.bulk_write(ops, ordered=False)
                 log.info(f"Successfully Synced: {club_name} (Rank {absolute_club_rank + 1})")
 
-    # Send the final aggregated summary with the club names included
     send_summary(new_count, shift_count, new_clubs_dict, shift_clubs_dict)
 
 if __name__ == "__main__":
