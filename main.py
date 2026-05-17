@@ -12,29 +12,22 @@ BASE_API = "https://uma.moe/api/v4/circles"
 
 session = requests.Session()
 
-def send_summary(new_count, shift_count, structural_changes):
-    """Sends a summary to Discord, filtering out player spam if a club falls/enters rank."""
+def send_summary(structural_changes, micro_changes):
+    """Sends combined macro and detailed micro player movements to Discord."""
     if not DISCORD_WEBHOOK_URL: return
-    messages = []
     
-    # Add macro club alerts first
-    for alert in structural_changes:
-        messages.append(alert)
-        
-    # Add individual statistics if they weren't filtered out by macro events
-    if new_count > 0:
-        messages.append(f"🆕 **{new_count}** new players entered tracked clubs.")
-    if shift_count > 0:
-        messages.append(f"🔄 **{shift_count}** players moved between tracked clubs.")
-    
+    messages = structural_changes + micro_changes
     if messages:
-        try:
-            discord_req.post(DISCORD_WEBHOOK_URL, json={"content": "\n".join(messages)})
-        except Exception as e:
-            log.error(f"Discord error: {e}")
+        # Chunk into batches of 20 to prevent hitting Discord payload limits
+        for i in range(0, len(messages), 20):
+            chunk = messages[i : i + 20]
+            try:
+                discord_req.post(DISCORD_WEBHOOK_URL, json={"content": "\n".join(chunk)})
+                time.sleep(1.0)
+            except Exception as e:
+                log.error(f"Discord error: {e}")
 
 def safe_get(url):
-    """Jittered requests to mimic human browsing and avoid IP flags."""
     time.sleep(random.uniform(5.0, 10.0)) 
     try:
         res = session.get(url.rstrip('/'), impersonate="chrome120", timeout=30)
@@ -47,30 +40,36 @@ def main(start, end):
     start, end = int(start), int(end)
     now_dt = datetime.datetime.now()
     curr_year, curr_month = now_dt.year, now_dt.month
+    run_timestamp = time.time()
     
     log.info(f"--- Starting Sync: Range {start} to {end} ---")
     session.get("https://uma.moe/ranking", impersonate="chrome120")
     
-    # Requesting up to 200 to accommodate your new logic parameters
     data = safe_get(f"{BASE_API}/list?page=0&limit=200&sort_by=rank&sort_dir=asc")
     if not data or "circles" not in data: 
         log.error("Failed to fetch Top Circles list.")
         return
 
     target_clubs = data["circles"][start:end]
-    live_club_names = {club.get("name") for club in target_clubs if club.get("name")}
+    
+    # Map absolute live ranks for clubs in this batch slice
+    live_club_ranks = {}
+    for idx, club in enumerate(target_clubs):
+        c_name = club.get("name")
+        if c_name:
+            live_club_ranks[c_name] = start + idx + 1
 
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
     
-    # 1. Cache current DB state into memory to optimize lookups and track mass dropouts
     log.info("Caching current database state...")
-    db_state = {rec["mid"]: rec for rec in db.find({}, {"mid": 1, "club": 1})}
+    db_state = {rec["mid"]: rec for rec in db.find({}, {"mid": 1, "club": 1, "name": 1})}
     
-    # 2. Stage live data to inspect it for macro movements before mutating data or counts
     staged_data = {}
-    incoming_club_player_counts = {} # club_name -> count of players who look "new" to this club
+    incoming_club_player_counts = {} 
+    micro_changes = []
     
+    # 1. Parse active rosters and capture individual movements
     for club in target_clubs:
         cid, club_name = club.get("circle_id"), club.get("name")
         club_url = f"{BASE_API}?circle_id={cid}&year={curr_year}&month={curr_month}"
@@ -86,80 +85,88 @@ def main(start, end):
                 
                 prev_record = db_state.get(p_id)
                 status = "STABLE"
+                prev_club = prev_record.get("club") if prev_record else None
                 
                 if not prev_record:
                     status = "NEW"
                     incoming_club_player_counts[club_name] += 1
-                elif prev_record.get("club") != club_name:
+                    micro_changes.append(f"📥 **{p_name}** (`{p_id}`) has joined **{club_name}**")
+                elif prev_club != club_name:
                     status = "SHIFT"
                     incoming_club_player_counts[club_name] += 1
+                    micro_changes.append(f"🔄 **{p_name}** (`{p_id}`) transferred: **{prev_club}** ➡️ **{club_name}**")
                 
                 staged_data[club_name].append({
-                    "id": p_id, "name": p_name, "status": status, "prev_club": prev_record.get("club") if prev_record else None
+                    "id": p_id, "name": p_name, "status": status, "prev_club": prev_club
                 })
 
-    # 3. Figure out if any tracked clubs completely left the tracked bracket
-    # Count how many players from old clubs are missing from the current live scrape
+    # 2. Check for missing players to catch club dropouts
     old_club_missing_counts = {}
     live_player_ids = {p["id"] for club_mems in staged_data.values() for p in club_mems}
     
     for p_id, rec in db_state.items():
-        if p_id not in live_player_ids:
-            old_club = rec.get("club")
-            if old_club:
+        old_club = rec.get("club")
+        if old_club in live_club_ranks: 
+            if p_id not in live_player_ids:
                 old_club_missing_counts[old_club] = old_club_missing_counts.get(old_club, 0) + 1
+            else:
+                current_rank = live_club_ranks.get(old_club)
+                if current_rank and current_rank > 100 and start < 100:
+                    old_club_missing_counts[old_club] = old_club_missing_counts.get(old_club, 0) + 1
 
-    # 4. Filter macro changes vs micro player changes
+    # 3. Evaluate Macro Structural Changes (Entries & Exits)
     structural_changes = []
-    ignored_incoming_clubs = set()
-    ignored_outgoing_clubs = set()
+    ignored_clubs = set()
 
-    # Club entered tracked list (> 25 players look brand new/shifted into this single club)
+    # Detect Entries
     for club_name, count in incoming_club_player_counts.items():
         if count >= 25:
-            structural_changes.append(f"🏰 **{club_name}** has entered the tracked rankings.")
-            ignored_incoming_clubs.add(club_name)
+            rank = live_club_ranks.get(club_name, 0)
+            ignored_clubs.add(club_name)
+            
+            if rank <= 100 and start < 100:
+                structural_changes.append(f"🏰 📈 **{club_name}** has entered the **Top 100** (Rank: #{rank})!")
+            elif rank > 100:
+                structural_changes.append(f"🏰 📈 **{club_name}** has entered the **Top 200** (Rank: #{rank})!")
 
-    # Club dropped out of tracked list (> 25 players from this club completely disappeared from live data)
+    # Detect Exits
     for club_name, count in old_club_missing_counts.items():
         if count >= 25:
-            structural_changes.append(f"📉 **{club_name}** has dropped out of the tracked rankings.")
-            ignored_outgoing_clubs.add(club_name)
+            current_rank = live_club_ranks.get(club_name)
+            ignored_clubs.add(club_name)
+            
+            if not current_rank:
+                structural_changes.append(f"📉 🚫 **{club_name}** has dropped out of the **Top 200** entirely.")
+            elif current_rank > 100 and start < 100:
+                structural_changes.append(f"⚠️ 📉 **{club_name}** has dropped out of the **Top 100** (Current Rank: #{current_rank}).")
 
-    # 5. Calculate precise metrics and prepare DB updates
-    new_count = 0
-    shift_count = 0
+    # 4. Filter micro spam if the club underwent a massive macro change
+    filtered_micro_changes = []
+    for msg in micro_changes:
+        if not any(club in msg for club in ignored_clubs):
+            filtered_micro_changes.append(msg)
+
+    # 5. Database Batch Updates with absolute ranking telemetry saved
     ops = []
-
     for club_name, members in staged_data.items():
-        # If the club itself is flagged as newly entering, suppress its individual entries
-        suppress_incoming = club_name in ignored_incoming_clubs
-        
+        current_assigned_rank = live_club_ranks.get(club_name, 200)
         for m in members:
-            if m["status"] == "NEW" and not suppress_incoming:
-                new_count += 1
-            elif m["status"] == "SHIFT":
-                # Suppress if target club is brand new, or origin club just fell out
-                if not suppress_incoming and m["prev_club"] not in ignored_outgoing_clubs:
-                    shift_count += 1
-
             ops.append(UpdateOne(
                 {"mid": m["id"]},
                 {"$set": {
                     "name": m["name"], 
                     "club": club_name, 
-                    "last_seen": time.time()
+                    "last_rank": current_assigned_rank,
+                    "last_seen": run_timestamp
                 }},
                 upsert=True
             ))
             
-    # Execute database writes
     if ops: 
         db.bulk_write(ops, ordered=False)
-        log.info(f"Successfully Bulk Synced {len(ops)} players across target range.")
+        log.info(f"Batch execution complete. Synced {len(ops)} records.")
 
-    # 6. Dispatch clean notification
-    send_summary(new_count, shift_count, structural_changes)
+    send_summary(structural_changes, filtered_micro_changes)
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
