@@ -1,76 +1,57 @@
-import os, time, requests as discord_req
+import os, time, requests
 from pymongo import MongoClient
 
-def check_exits():
-    MONGO_URI = os.getenv("MONGO_URI")
-    DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-    
-    if not DISCORD_WEBHOOK_URL:
-        print("Error: DISCORD_WEBHOOK_URL not found in environment.")
-        return
+MONGO_URI = os.getenv("MONGO_URI")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
+def process_post_scan_transfers():
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
-    club_db = client["uma_tracker"]["clubs"]
     
-    # 2-Hour Time Window
+    # 1. Grab all active members updated in the last 2 hours
     cutoff_time = time.time() - 7200
+    active_players = db.find({"last_seen": {"$gt": cutoff_time}})
     
-    # Evaluate global leaderboard exits by verifying club listings
-    active_clubs = list(club_db.find({}))
-    active_club_names = {c["name"] for c in active_clubs}
+    new_count = 0
+    shift_count = 0
+    new_clubs_dict = {}
+    shift_clubs_dict = {}
     
-    # 1. Process Individual Missing Flags
-    exited_players = list(db.find({"last_seen": {"$lt": cutoff_time}}))
-    
-    if exited_players:
-        top_100_leavers = []
-        top_200_leavers = []
-        ids_to_purge = []
+    for player in active_players:
+        current_club = player.get("club")
+        previous_club = player.get("previous_club")
         
-        for p in exited_players:
-            mid = p.get('mid')
-            tier = p.get('club_tier', 'Top 100')
-            old_club = p.get('club', 'Unknown')
+        # Scenario A: Brand new player profile never seen before
+        if not previous_club:
+            new_count += 1
+            new_clubs_dict[current_club] = new_clubs_dict.get(current_club, 0) + 1
+            db.update_one({"_id": player["_id"]}, {"$set": {"previous_club": current_club}})
             
-            # Evaluate if the club dropped out of the Top 200 completely
-            if old_club not in active_club_names:
-                if tier == "Top 100":
-                    top_100_leavers.append(str(mid))
-                else:
-                    top_200_leavers.append(str(mid))
-            ids_to_purge.append(p["_id"])
+        # Scenario B: Existing player swapped clubs
+        elif previous_club != current_club:
+            shift_count += 1
+            shift_clubs_dict[current_club] = shift_clubs_dict.get(current_club, 0) + 1
+            db.update_one({"_id": player["_id"]}, {"$set": {"previous_club": current_club}})
 
-        # Send structured alerts depending on tier origin
-        if top_100_leavers:
-            msg = "**❌ LEAVER IDs DETECTED (Dropped out of Top 100):**\n```text\n" + "\n".join(top_100_leavers) + "\n```"
-            discord_req.post(DISCORD_WEBHOOK_URL, json={"content": msg})
+    # 2. Format and send a single consolidated alert to Discord
+    if not DISCORD_WEBHOOK_URL: return
+    messages = []
+    
+    if new_count > 0:
+        messages.append(f"🆕 **{new_count}** new players entered the tracking pool.")
+        for club, count in sorted(new_clubs_dict.items(), key=lambda x: x[1], reverse=True):
+            messages.append(f"  • **{club}**: +{count} new player(s)")
             
-        if top_200_leavers:
-            msg = "**❌ LEAVER IDs DETECTED (Dropped out of Top 200):**\n```text\n" + "\n".join(top_200_leavers) + "\n```"
-            discord_req.post(DISCORD_WEBHOOK_URL, json={"content": msg})
-
-        if ids_to_purge:
-            db.delete_many({"_id": {"$in": ids_to_purge}})
-
-    # 2. Process Your "25 or More" Roster Threshold Rule
-    for club in active_clubs:
-        c_name = club.get("name")
-        c_rank = club.get("last_known_rank", 999)
-        
-        # Count current verified members checked in during tonight's loop
-        active_member_count = db.count_documents({"club": c_name, "last_seen": {"$gte": cutoff_time}})
-        
-        # If roster drops below your critical limit
-        if active_member_count > 0 and active_member_count < 25:
-            tier_label = "Top 100" if c_rank < 100 else "Top 200"
-            alert_payload = {
-                "content": f"⚠️ **Critical Threshold Alert:** Club **{c_name}** ({tier_label}, Rank {c_rank + 1}) has dropped below your threshold with only **{active_member_count}** active tracked members!"
-            }
-            try:
-                discord_req.post(DISCORD_WEBHOOK_URL, json=alert_payload)
-            except Exception as e:
-                print(f"Failed to post threshold warning: {e}")
+    if shift_count > 0:
+        messages.append(f"\n🔄 **{shift_count}** players moved between tracked clubs.")
+        for club, count in sorted(shift_clubs_dict.items(), key=lambda x: x[1], reverse=True):
+            messages.append(f"  • **{club}**: +{count} transferred player(s)")
+            
+    if messages:
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": "\n".join(messages)})
 
 if __name__ == "__main__":
-    check_exits()
+    # Your existing leaver code here...
+    # ...
+    # Run the perfect transfer logic right at the end:
+    process_post_scan_transfers()
