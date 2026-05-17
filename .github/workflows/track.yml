@@ -17,7 +17,7 @@ jobs:
       - name: Add Human Jitter Delay
         shell: cmd # Bypasses PowerShell ExecutionPolicy restrictions completely
         if: matrix.range[0] == 0
-        run: python -c "import time, random; delay = random.randint(60, 900); print(f'Sleeping for {delay}s...'); time.sleep(delay)"
+        run: python -c "import time, random; delay = random.randint(43, 378); print(f'Sleeping for {delay}s...'); time.sleep(delay)"
 
       - name: Sync Batch
         run: py main.py ${{ matrix.range[0] }} ${{ matrix.range[1] }}
