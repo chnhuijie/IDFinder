@@ -1,58 +1,57 @@
-import os, time, logging, requests as discord_req
+import os, time, requests as discord_req
 from pymongo import MongoClient
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger(__name__)
 
 def check_exits():
     MONGO_URI = os.getenv("MONGO_URI")
     DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
     
     if not DISCORD_WEBHOOK_URL:
-        log.error("Error: DISCORD_WEBHOOK_URL not found in environment.")
+        print("Error: DISCORD_WEBHOOK_URL not found in environment.")
         return
 
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
     
-    # 1. Capture any player who was completely missed by all 10 matrix chunks today
-    # 5400 seconds (1.5 hours) cleanly covers the linear matrix execution window
-    cutoff_time = time.time() - 5400 
+    # ⏱️ 2-Hour Window Fix: 2 hours = 7200 seconds.
+    # Anyone who hasn't been scanned in 2 hours is verified as a true leaver.
+    cutoff_time = time.time() - 7200
+    
     exited_players = list(db.find({"last_seen": {"$lt": cutoff_time}}))
     
     if exited_players:
-        top_100_exits = []
+        id_list = []
         ids_to_delete = []
         
         for p in exited_players:
-            name = p.get('name', 'Unknown')
             mid = p.get('mid')
-            old_club = p.get('club', 'Unknown Club')
-            last_rank = p.get('last_rank', 200) 
+            if mid:
+                id_list.append(str(mid))
             ids_to_delete.append(p["_id"])
-            
-            # CRITICAL FILTER: Only alert if their last tracked location was a Top 100 club
-            if last_rank <= 100:
-                top_100_exits.append(f"❌ **{name}** (`{mid}`) has vanished from **{old_club}** (Last Rank: #{last_rank})")
         
-        # 2. Forward alerts to your Discord Webhook
-        if top_100_exits:
-            for i in range(0, len(top_100_exits), 20):
-                chunk = top_100_exits[i : i + 20]
-                header = "🚨 **CRITICAL EXITS: Players dropped from Top 100 out of Top 200 completely** 🚨"
-                payload = {"content": f"{header}\n" + "\n".join(chunk)}
-                try:
-                    discord_req.post(DISCORD_WEBHOOK_URL, json=payload)
-                    time.sleep(1.5)
-                except Exception as e:
-                    log.error(f"Failed to send exit alert batch: {e}")
+        # Format the IDs into a clean, vertical newline list
+        formatted_ids = "\n".join(id_list)
+        
+        # Construct payload with just the raw code block data you requested
+        payload = {
+            "username": "Leaderboard Tracker Bot",
+            "content": f"**❌ LEAVER IDs DETECTED (Dropped out of Top 200):**\n```text\n{formatted_ids}\n```"
+        }
+        
+        try:
+            res = discord_req.post(DISCORD_WEBHOOK_URL, json=payload)
+            if res.status_code == 204:
+                print("✅ Leaver IDs successfully sent to Discord!")
+            else:
+                print(f"⚠️ Discord returned an error status: {res.status_code}")
+        except Exception as e:
+            print(f"Failed to send exit alert: {e}")
 
-        # 3. Securely remove the files from the tracking collection so they don't alert again tomorrow
+        # Clean old leavers out of your database collection automatically
         if ids_to_delete:
             db.delete_many({"_id": {"$in": ids_to_delete}})
-            log.info(f"Cleanup complete. Pruned {len(ids_to_delete)} total historical records.")
+            print(f"Cleanup complete. Removed {len(ids_to_delete)} old leaver records from cloud database.")
     else:
-        log.info("No system exits detected in this workflow cycle.")
+        print("✅ No exits detected in this safety cycle.")
 
 if __name__ == "__main__":
     check_exits()
