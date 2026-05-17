@@ -6,6 +6,7 @@ on:
 jobs:
   scrape:
     runs-on: self-hosted
+    timeout-minutes: 60 # Fail-safe to prevent background scripts from hanging on your PC hardware
     strategy:
       max-parallel: 1
       matrix:
@@ -29,6 +30,7 @@ jobs:
   cleanup_and_notify:
     needs: scrape
     runs-on: self-hosted
+    timeout-minutes: 60 # Clean backup limit for the sweeper process
     steps:
       - uses: actions/checkout@v4
       
