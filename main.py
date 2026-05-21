@@ -59,11 +59,30 @@ def main(start, end):
         if detail and "members" in detail:
             raw_members = detail.get("members") or []
             valid_members = []
-            for m in raw_members:
-                p_id = str(m.get("viewer_id") or m.get("id") or "").strip()
-                if p_id and p_id.lower() != "none":
-                    valid_members.append((p_id, m))
             
+            for m in raw_members:
+                if not m:
+                    continue
+                
+                p_id = str(m.get("viewer_id") or m.get("id") or "").strip()
+                
+                # 🛡️ GHOST FILTER EXTRACTION LAYER
+                # Drop entries lacking valid IDs
+                if not p_id or p_id.lower() == "none":
+                    continue
+                
+                # Drop entries explicitly tagged as left/inactive by the system
+                if m.get("left") is True or m.get("active") is False:
+                    continue
+                    
+                # Drop members showing 0 cumulative point updates for the tracked month
+                if m.get("fans") == 0 or m.get("point") == 0:
+                    continue
+                
+                # If the item clears all validation checks, it is an active roster spot
+                valid_members.append((p_id, m))
+            
+            # Now this slice will capture only true active users!
             target_members = valid_members[:30]
             ops = []
             for p_id, m in target_members:
@@ -82,7 +101,7 @@ def main(start, end):
             
             if ops: 
                 db.bulk_write(ops, ordered=False)
-                log.info(f"Successfully Synced: {club_name} (Rank {absolute_club_rank + 1})")
+                log.info(f"Successfully Synced: {club_name} (Rank {absolute_club_rank + 1}) | Active Members: {len(target_members)}")
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
