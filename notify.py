@@ -1,5 +1,5 @@
 import os, time, requests
-from pymongo import MongoClient
+from pymongo import MongoClient, UpdateOne
 
 MONGO_URI = os.getenv("MONGO_URI")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
@@ -15,21 +15,16 @@ def process_post_scan_transfers():
     # ------------------------------------------------------------------
     # 📊 SEED RUN PROTECTION CHECK
     # ------------------------------------------------------------------
-    # Check if this is the first time expanding to 500. 
-    # If total tracked clubs in DB is low, we skip "flux alerts" for tonight 
-    # to prevent a massive first-scan freeze.
     total_historic_clubs = clubs_col.count_documents({})
     is_first_scale_run = total_historic_clubs < 450 
     
     # ------------------------------------------------------------------
-    # 🏰 CLUB LEADERBOARD FLUX DETECTOR (ENTERS/LEAVES TOP 500)
+    # 🏰 CLUB LEADERBOARD FLUX DETECTOR
     # ------------------------------------------------------------------
     dropped_clubs = []
     new_clubs = []
     
-    # Only calculate structural entry/exit alerts if we actually have historical data to compare against!
     if not is_first_scale_run:
-        # A. Detect clubs that left the Top 500
         dropped_clubs_cursor = list(clubs_col.find({"last_updated": {"$lte": cutoff_time}}))
         if dropped_clubs_cursor:
             dropped_ids = []
@@ -41,13 +36,10 @@ def process_post_scan_transfers():
                 dropped_ids.append(c["_id"])
             clubs_col.delete_many({"_id": {"$in": dropped_ids}})
 
-        # B. Detect clubs that just entered the Top 500
         active_clubs_meta = list(clubs_col.find({"last_updated": {"$gt": cutoff_time}}))
         for c in active_clubs_meta:
             club_name = c.get("name")
             if club_name:
-                # Fast indexed lookup: see if this club had an active record BEFORE tonight
-                # If its last_updated was NEVER set before tonight's window, it's a new entry
                 if c.get("last_updated", 0) <= cutoff_time:
                     has_tracked_members = db.find_one({"club": club_name, "club_tier": {"$ne": "Unranked"}})
                     if not has_tracked_members:
@@ -56,13 +48,14 @@ def process_post_scan_transfers():
                             "current_rank": c.get("last_known_rank", 0) + 1
                         })
     else:
-        print("🌱 Seed Run Detected: Populating new 201-500 club tiers into database. Skipping flux alerts for tonight.")
+        print("🌱 Seed Run Detected: Skipping club flux alerts for tonight.")
 
     # ------------------------------------------------------------------
-    # 🕵️‍♂️ TARGETED TOP 250 LEAVER DETECTOR
+    # 🕵️‍♂️ TARGETED TOP 250 LEAVER DETECTOR (Optimized with Bulk Write)
     # ------------------------------------------------------------------
-    missing_players = db.find({"last_seen": {"$lte": cutoff_time}})
+    missing_players = list(db.find({"last_seen": {"$lte": cutoff_time}}))
     top250_leavers = []
+    leaver_ops = []
     
     for player in missing_players:
         prev_club_name = player.get("club")
@@ -81,20 +74,24 @@ def process_post_scan_transfers():
                         "rank": last_rank + 1
                     })
                     
-                    db.update_one(
-                        {"_id": player["_id"]}, 
+                    leaver_ops.append(UpdateOne(
+                        {"_id": player["_id"]},
                         {"$set": {"previous_club": None, "club": None, "club_tier": "Unranked"}}
-                    )
+                    ))
+                    
+    if leaver_ops:
+        db.bulk_write(leaver_ops, ordered=False)
 
     # ------------------------------------------------------------------
-    # 🔄 ACTIVE TRANSFER & NEW PLAYER METRICS
+    # 🔄 ACTIVE TRANSFER & NEW PLAYER METRICS (Optimized with Bulk Write)
     # ------------------------------------------------------------------
-    active_players = db.find({"last_seen": {"$gt": cutoff_time}})
+    active_players = list(db.find({"last_seen": {"$gt": cutoff_time}}))
     
     new_count = 0
     shift_count = 0
     new_clubs_dict = {}
     shift_clubs_dict = {}
+    player_ops = []
     
     for player in active_players:
         current_club = player.get("club")
@@ -103,12 +100,17 @@ def process_post_scan_transfers():
         if not previous_club:
             new_count += 1
             new_clubs_dict[current_club] = new_clubs_dict.get(current_club, 0) + 1
-            db.update_one({"_id": player["_id"]}, {"$set": {"previous_club": current_club}})
+            player_ops.append(UpdateOne({"_id": player["_id"]}, {"$set": {"previous_club": current_club}}))
             
         elif previous_club != current_club:
             shift_count += 1
             shift_clubs_dict[current_club] = shift_clubs_dict.get(current_club, 0) + 1
-            db.update_one({"_id": player["_id"]}, {"$set": {"previous_club": current_club}})
+            player_ops.append(UpdateOne({"_id": player["_id"]}, {"$set": {"previous_club": current_club}}))
+
+    # Perform a lightning-fast batch update of all 15,000 accounts at once
+    if player_ops:
+        print(f"📦 Executing bulk write operations for {len(player_ops)} players...")
+        db.bulk_write(player_ops, ordered=False)
 
     # ------------------------------------------------------------------
     # 📢 DISCORD PAYLOAD GENERATION & DELIVERY
@@ -131,10 +133,9 @@ def process_post_scan_transfers():
             messages.append(f"  • `ID: {leaver['id']}` | **{leaver['name']}** left **{leaver['old_club']}** (Rank {leaver['rank']})")
         messages.append("") 
 
-    # On a seed run, filter out the initial 9000-player explosion from spamming Discord
     if new_count > 0 and not is_first_scale_run:
         messages.append(f"🆕 **{new_count}** new players entered the tracking pool.")
-        for club, count in sorted(new_clubs_dict.items(), key=lambda x: x[1], reverse=True)[:15]: # Cap preview list to top 15 entries
+        for club, count in sorted(new_clubs_dict.items(), key=lambda x: x[1], reverse=True)[:15]:
             messages.append(f"  • **{club}**: +{count} new player(s)")
             
     if shift_count > 0:
