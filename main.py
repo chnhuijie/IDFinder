@@ -52,7 +52,6 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month):
         absolute_club_rank = batch_start + index 
         cid, club_name = club.get("circle_id"), club.get("name")
         
-        # Unique Circle ID serves as your immutable anchor for rank monitoring
         club_rank_collection.update_one(
             {"circle_id": cid},
             {"$set": {"name": club_name, "last_known_rank": absolute_club_rank, "last_updated": time.time()}},
@@ -72,7 +71,6 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month):
                 
                 p_id = str(m.get("viewer_id") or m.get("id") or "").strip()
                 
-                # 🛡️ GHOST FILTER LAYER
                 if not p_id or p_id.lower() == "none":
                     continue
                 if m.get("left") is True or m.get("active") is False:
@@ -99,7 +97,7 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month):
                     {"$set": {
                         "name": p_name, 
                         "club": club_name,
-                        "club_id": cid,  # 🆔 Hard-linked to protect against shared club names
+                        "club_id": cid,  
                         "club_tier": tier_label,
                         "last_seen": time.time()
                     }},
