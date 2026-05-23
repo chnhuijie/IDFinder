@@ -9,13 +9,14 @@ def process_post_scan_transfers():
     db = client["uma_tracker"]["members"]
     clubs_col = client["uma_tracker"]["clubs"]
     
-    # 🕒 4-Hour Cutoff Window to verify who was missing tonight
+    # 🕒 4-Hour Safety Cutoff Window 
+    # Ensures all parallel cloud nodes have fully completed writing before we check for missing members
     cutoff_time = time.time() - 14400
     
     # ------------------------------------------------------------------
-    # 🕵️‍♂️ NEW FEATURE: TARGETED TOP 250 LEAVER DETECTOR
+    # 🕵️‍♂️ ELITE FREE AGENT DETECTOR (TOP 250 LEAVERS)
     # ------------------------------------------------------------------
-    # 1. Find players who were NOT updated tonight (dropped out of top 500)
+    # Look for players whose last_seen was NOT updated during tonight's sweep
     missing_players = db.find({"last_seen": {"$lte": cutoff_time}})
     
     top250_leavers = []
@@ -26,10 +27,10 @@ def process_post_scan_transfers():
         p_name = player.get("name") or "Unknown"
         
         if prev_club_name:
-            # Look up the previous club's rank recorded during the last cycle
+            # Cross-reference the club's rank recorded tonight
             club_data = clubs_col.find_one({"name": prev_club_name})
             if club_data:
-                # MongoDB rank index starts at 0, so rank 249 is absolute Rank 250
+                # MongoDB index 0-249 represents Absolute Ranks 1 to 250
                 last_rank = club_data.get("last_known_rank", 999)
                 
                 if last_rank < 250:
@@ -40,15 +41,14 @@ def process_post_scan_transfers():
                         "rank": last_rank + 1
                     })
                     
-                    # Clean up their profile status in the database so they don't 
-                    # trigger alerts repeatedly on subsequent nights
+                    # Wipe their active tracking anchor so they don't fire alerts tomorrow night
                     db.update_one(
                         {"_id": player["_id"]}, 
                         {"$set": {"previous_club": None, "club": None, "club_tier": "Unranked"}}
                     )
 
     # ------------------------------------------------------------------
-    # 🔄 EXISTING FEATURE: ACTIVE TRANSFER & NEW PLAYER METRICS
+    # 🔄 ACTIVE TRANSFER & NEW PLAYER METRICS
     # ------------------------------------------------------------------
     active_players = db.find({"last_seen": {"$gt": cutoff_time}})
     
@@ -74,36 +74,35 @@ def process_post_scan_transfers():
             db.update_one({"_id": player["_id"]}, {"$set": {"previous_club": current_club}})
 
     # ------------------------------------------------------------------
-    # 📢 DISCORD PAYLOAD GENERATION & CHUNKING
+    # 📢 DISCORD PAYLOAD GENERATION & DELIVER
     # ------------------------------------------------------------------
     if not DISCORD_WEBHOOK_URL: return
     messages = []
     
-    # 🟥 Alert Section: Elite Free Agents (Left Top 250 -> Missing from Top 500)
+    # Section 1: Elite Free Agents (Dropped entirely off the Top 500 radar)
     if top250_leavers:
         messages.append("⚠️ **Top 250 Elite Leavers / Free Agents Spotted**")
-        messages.append("*Left their club and dropped completely off the Top 500 radar:*")
+        messages.append("*Left their club and dropped completely off the leaderboard grid:*")
         for leaver in sorted(top250_leavers, key=lambda x: x['rank']):
             messages.append(f"  • `ID: {leaver['id']}` | **{leaver['name']}** left **{leaver['old_club']}** (Rank {leaver['rank']})")
-        messages.append("") # Spacer Line
+        messages.append("") 
 
-    # 🆕 Alert Section: New Entries
+    # Section 2: New Entries
     if new_count > 0:
         messages.append(f"🆕 **{new_count}** new players entered the tracking pool.")
         for club, count in sorted(new_clubs_dict.items(), key=lambda x: x[1], reverse=True):
             messages.append(f"  • **{club}**: +{count} new player(s)")
             
-    # 🔄 Alert Section: Roster Swaps
+    # Section 3: Active Roster Swaps
     if shift_count > 0:
         messages.append(f"\n🔄 **{shift_count}** players moved between tracked clubs.")
         for club, count in sorted(shift_clubs_dict.items(), key=lambda x: x[1], reverse=True):
             messages.append(f"  • **{club}**: +{count} transferred player(s)")
             
-    # Delivery Engine: Protects against Discord's 2000 character limits
+    # Secure delivery chunking to stay safely beneath Discord's 2000 character block caps
     if messages:
         full_message = "\n".join(messages)
         if len(full_message) > 1900:
-            # Safe chunk fallback loops every 20 lines to prevent payload cutting
             chunks = [messages[i:i + 20] for i in range(0, len(messages), 20)]
             for chunk in chunks:
                 requests.post(DISCORD_WEBHOOK_URL, json={"content": "\n".join(chunk)})
