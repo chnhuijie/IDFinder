@@ -6,9 +6,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 MONGO_URI = os.getenv("MONGO_URI")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 BASE_API = "https://uma.moe/api/v4/circles"
 
 session = requests.Session()
+
+def send_discord_log(message):
+    """Sends active loop live-stream status signals directly to your log channel."""
+    if DISCORD_WEBHOOK_URL:
+        try:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=10)
+        except Exception as e:
+            log.error(f"Failed to send Discord log: {e}")
 
 def safe_get(url):
     time.sleep(random.uniform(3.0, 6.0)) 
@@ -20,7 +29,7 @@ def safe_get(url):
     return None
 
 def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month):
-    """Processes a micro-chunk of 20 clubs sequentially to optimize server footprint."""
+    """Processes your assigned range in micro-batches of 20 clubs to maintain a safe footprint."""
     api_page = batch_start // 100
     api_start = batch_start % 100
     api_end = batch_end % 100
@@ -43,6 +52,7 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month):
         absolute_club_rank = batch_start + index 
         cid, club_name = club.get("circle_id"), club.get("name")
         
+        # Unique Circle ID serves as your immutable anchor for rank monitoring
         club_rank_collection.update_one(
             {"circle_id": cid},
             {"$set": {"name": club_name, "last_known_rank": absolute_club_rank, "last_updated": time.time()}},
@@ -62,6 +72,7 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month):
                 
                 p_id = str(m.get("viewer_id") or m.get("id") or "").strip()
                 
+                # 🛡️ GHOST FILTER LAYER
                 if not p_id or p_id.lower() == "none":
                     continue
                 if m.get("left") is True or m.get("active") is False:
@@ -88,6 +99,7 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month):
                     {"$set": {
                         "name": p_name, 
                         "club": club_name,
+                        "club_id": cid,  # 🆔 Hard-linked to protect against shared club names
                         "club_tier": tier_label,
                         "last_seen": time.time()
                     }},
@@ -97,6 +109,7 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month):
             if ops: 
                 db.bulk_write(ops, ordered=False)
                 log.info(f"Successfully Synced: {club_name} (Rank {absolute_club_rank + 1}) | Active Members: {len(target_members)}")
+                send_discord_log(f"✅ **Synced:** `{club_name}` (Rank {absolute_club_rank + 1}) | Active: {len(target_members)}/30")
                 
     client.close()
 
@@ -106,20 +119,19 @@ def main(start, end):
     curr_year, curr_month = now_dt.year, now_dt.month
     
     log.info(f"--- Starting Sync Stream: Range {start} to {end} ---")
+    send_discord_log(f"🛰️ **Tracker Stream Activated:** Syncing ranks {start} to {end}...")
+    
     session.get("https://uma.moe/ranking", impersonate="chrome120")
     
     current_step = start
     while current_step < end:
         next_step = min(current_step + 20, end)
-        log.info(f"📦 Streaming Sub-Batch: Ranks {current_step} through {next_step}")
-        
         process_club_sub_batch(current_step, next_step, curr_year, curr_month)
-        
         current_step = next_step
         if current_step < end:
             time.sleep(random.uniform(15.0, 30.0))
             
-    log.info(f"🏁 Stream Sequence Completed for Range {start}-{end}.")
+    send_discord_log(f"🏁 **Stream Completed:** Ranks {start} to {end} are fully committed.")
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
