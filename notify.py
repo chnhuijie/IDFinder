@@ -39,19 +39,20 @@ def process_post_scan_transfers():
         active_clubs_meta = list(clubs_col.find({"last_updated": {"$gt": cutoff_time}}))
         for c in active_clubs_meta:
             club_name = c.get("name")
-            if club_name:
+            club_id = c.get("circle_id")
+            if club_name and club_id:
                 if c.get("last_updated", 0) <= cutoff_time:
-                    has_tracked_members = db.find_one({"club": club_name, "club_tier": {"$ne": "Unranked"}})
+                    has_tracked_members = db.find_one({"club_id": club_id, "club_tier": {"$ne": "Unranked"}})
                     if not has_tracked_members:
                         new_clubs.append({
                             "name": club_name,
                             "current_rank": c.get("last_known_rank", 0) + 1
                         })
     else:
-        print("🌱 Seed Run Detected: Skipping club flux alerts for tonight.")
+        print("🌱 Seed Run: Establishing foundation rows. Skipping structural flux alerts.")
 
     # ------------------------------------------------------------------
-    # 🕵️‍♂️ TARGETED TOP 250 LEAVER DETECTOR (Optimized with Bulk Write)
+    # 🕵️‍♂️ TARGETED TOP 250 LEAVER DETECTOR (Bulk-Write Optimized)
     # ------------------------------------------------------------------
     missing_players = list(db.find({"last_seen": {"$lte": cutoff_time}}))
     top250_leavers = []
@@ -59,11 +60,13 @@ def process_post_scan_transfers():
     
     for player in missing_players:
         prev_club_name = player.get("club")
+        prev_club_id = player.get("club_id")
         p_id = player.get("mid")
         p_name = player.get("name") or "Unknown"
         
-        if prev_club_name:
-            club_data = clubs_col.find_one({"name": prev_club_name})
+        if prev_club_id:
+            # Look up cross-referenced ranks using unique Circle IDs
+            club_data = clubs_col.find_one({"circle_id": prev_club_id})
             if club_data:
                 last_rank = club_data.get("last_known_rank", 999)
                 if last_rank < 250:
@@ -76,14 +79,14 @@ def process_post_scan_transfers():
                     
                     leaver_ops.append(UpdateOne(
                         {"_id": player["_id"]},
-                        {"$set": {"previous_club": None, "club": None, "club_tier": "Unranked"}}
+                        {"$set": {"previous_club": None, "club": None, "club_id": None, "club_tier": "Unranked"}}
                     ))
                     
     if leaver_ops:
         db.bulk_write(leaver_ops, ordered=False)
 
     # ------------------------------------------------------------------
-    # 🔄 ACTIVE TRANSFER & NEW PLAYER METRICS (Optimized with Bulk Write)
+    # 🔄 ACTIVE TRANSFER & NEW PLAYER METRICS (Bulk-Write Optimized)
     # ------------------------------------------------------------------
     active_players = list(db.find({"last_seen": {"$gt": cutoff_time}}))
     
@@ -95,6 +98,7 @@ def process_post_scan_transfers():
     
     for player in active_players:
         current_club = player.get("club")
+        current_club_id = player.get("club_id")
         previous_club = player.get("previous_club")
         
         if not previous_club:
@@ -107,13 +111,13 @@ def process_post_scan_transfers():
             shift_clubs_dict[current_club] = shift_clubs_dict.get(current_club, 0) + 1
             player_ops.append(UpdateOne({"_id": player["_id"]}, {"$set": {"previous_club": current_club}}))
 
-    # Perform a lightning-fast batch update of all 15,000 accounts at once
+    # Transmit all 15,000 updates in a single, ultra-fast memory batch execution
     if player_ops:
-        print(f"📦 Executing bulk write operations for {len(player_ops)} players...")
+        print(f"📦 Committing bulk execution updates for {len(player_ops)} active profiles...")
         db.bulk_write(player_ops, ordered=False)
 
     # ------------------------------------------------------------------
-    # 📢 DISCORD PAYLOAD GENERATION & DELIVERY
+    # 📢 CONSOLIDATED DISCORD REPORTING BROADCAST
     # ------------------------------------------------------------------
     if not DISCORD_WEBHOOK_URL: return
     messages = []
