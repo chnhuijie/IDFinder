@@ -11,7 +11,6 @@ BASE_API = "https://uma.moe/api/v4/circles"
 session = requests.Session()
 
 def safe_get(url):
-    # Safe humanized time interval between profile scraping loops
     time.sleep(random.uniform(3.0, 6.0)) 
     try:
         res = session.get(url.rstrip('/'), impersonate="chrome120", timeout=30)
@@ -22,8 +21,6 @@ def safe_get(url):
 
 def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month):
     """Processes a micro-chunk of 20 clubs sequentially to optimize server footprint."""
-    # 📈 DYNAMIC CLOUD PAGE RESOLUTION
-    # Automatically tracks any assignment segment cleanly into the API's 100-row page blocks
     api_page = batch_start // 100
     api_start = batch_start % 100
     api_end = batch_end % 100
@@ -65,7 +62,6 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month):
                 
                 p_id = str(m.get("viewer_id") or m.get("id") or "").strip()
                 
-                # 🛡️ GHOST FILTER EXTRACTION LAYER
                 if not p_id or p_id.lower() == "none":
                     continue
                 if m.get("left") is True or m.get("active") is False:
@@ -80,7 +76,6 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month):
             for p_id, m in target_members:
                 p_name = m.get("name") or m.get("nickname") or "Unknown"
 
-                # Calculate the accurate tier mapping boundary for the Top 500 spectrum
                 if absolute_club_rank < 100:
                     tier_label = "Top 100"
                 elif absolute_club_rank < 200:
@@ -113,8 +108,6 @@ def main(start, end):
     log.info(f"--- Starting Sync Stream: Range {start} to {end} ---")
     session.get("https://uma.moe/ranking", impersonate="chrome120")
     
-    # 📦 THE INTERNAL 0-20 CHUNKER RULE
-    # Breaks your assigned 100-club matrix run into sequential micro-blocks of 20
     current_step = start
     while current_step < end:
         next_step = min(current_step + 20, end)
@@ -124,7 +117,6 @@ def main(start, end):
         
         current_step = next_step
         if current_step < end:
-            # Let the endpoint breathe between your 20-club segments
             time.sleep(random.uniform(15.0, 30.0))
             
     log.info(f"🏁 Stream Sequence Completed for Range {start}-{end}.")
