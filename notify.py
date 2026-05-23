@@ -9,18 +9,11 @@ def process_post_scan_transfers():
     db = client["uma_tracker"]["members"]
     clubs_col = client["uma_tracker"]["clubs"]
     
-    # 🕒 4-Hour Safety Cutoff Window 
     cutoff_time = time.time() - 14400
     
-    # ------------------------------------------------------------------
-    # 📊 SEED RUN PROTECTION CHECK
-    # ------------------------------------------------------------------
     total_historic_clubs = clubs_col.count_documents({})
     is_first_scale_run = total_historic_clubs < 450 
     
-    # ------------------------------------------------------------------
-    # 🏰 CLUB LEADERBOARD FLUX DETECTOR
-    # ------------------------------------------------------------------
     dropped_clubs = []
     new_clubs = []
     
@@ -51,9 +44,6 @@ def process_post_scan_transfers():
     else:
         print("🌱 Seed Run: Establishing foundation rows. Skipping structural flux alerts.")
 
-    # ------------------------------------------------------------------
-    # 🕵️‍♂️ TARGETED TOP 250 LEAVER DETECTOR (Bulk-Write Optimized)
-    # ------------------------------------------------------------------
     missing_players = list(db.find({"last_seen": {"$lte": cutoff_time}}))
     top250_leavers = []
     leaver_ops = []
@@ -65,7 +55,6 @@ def process_post_scan_transfers():
         p_name = player.get("name") or "Unknown"
         
         if prev_club_id:
-            # Look up cross-referenced ranks using unique Circle IDs
             club_data = clubs_col.find_one({"circle_id": prev_club_id})
             if club_data:
                 last_rank = club_data.get("last_known_rank", 999)
@@ -85,9 +74,6 @@ def process_post_scan_transfers():
     if leaver_ops:
         db.bulk_write(leaver_ops, ordered=False)
 
-    # ------------------------------------------------------------------
-    # 🔄 ACTIVE TRANSFER & NEW PLAYER METRICS (Bulk-Write Optimized)
-    # ------------------------------------------------------------------
     active_players = list(db.find({"last_seen": {"$gt": cutoff_time}}))
     
     new_count = 0
@@ -111,14 +97,10 @@ def process_post_scan_transfers():
             shift_clubs_dict[current_club] = shift_clubs_dict.get(current_club, 0) + 1
             player_ops.append(UpdateOne({"_id": player["_id"]}, {"$set": {"previous_club": current_club}}))
 
-    # Transmit all 15,000 updates in a single, ultra-fast memory batch execution
     if player_ops:
         print(f"📦 Committing bulk execution updates for {len(player_ops)} active profiles...")
         db.bulk_write(player_ops, ordered=False)
-
-    # ------------------------------------------------------------------
-    # 📢 CONSOLIDATED DISCORD REPORTING BROADCAST
-    # ------------------------------------------------------------------
+        
     if not DISCORD_WEBHOOK_URL: return
     messages = []
     
