@@ -41,7 +41,7 @@ jobs:
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
         with:
-          timeout_minutes: 15
+          timeout_minutes: 30
           max_attempts: 3            
           retry_wait_seconds: 30    
           command: python main.py ${{ matrix.start }} ${{ matrix.end }}
