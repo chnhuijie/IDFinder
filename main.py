@@ -11,6 +11,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 MONGO_URI = os.getenv("MONGO_URI")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL") 
 BASE_API = "https://uma.moe/api/v4/circles"
 
 session = requests.Session()
@@ -43,6 +44,8 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
     db = client["uma_tracker"]["members"]
     club_rank_collection = client["uma_tracker"]["clubs"]
     
+    discord_stream_chunk = [] 
+
     for index, club in enumerate(target_clubs):
         absolute_club_rank = batch_start + index 
         cid, club_name = club.get("circle_id"), club.get("name")
@@ -100,7 +103,7 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                     "is_new_flag": is_new_pool,
                     "club_tier": tier_label,
                     "last_seen": time.time(),
-                    "updated_at": datetime.datetime.now(datetime.timezone.utc), 
+                    "updated_at": datetime.datetime.now(datetime.timezone.utc),
                     "last_run_id": run_id
                 }
 
@@ -115,9 +118,20 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
             
             if ops: 
                 db.bulk_write(ops, ordered=False)
-                log.info(f"Synced: {club_name} (Rank {absolute_club_rank + 1})")
+                
+                log_line = f" **Synced:** `{club_name}` (Rank {absolute_club_rank + 1}) | Active: {len(ops)}/30"
+                log.info(log_line)
+                discord_stream_chunk.append(log_line)
                 
     client.close()
+
+    if discord_stream_chunk and DISCORD_WEBHOOK_URL:
+        stream_message = f"📡 **Data Stream: Ranks {batch_start + 1} to {batch_end}**\n" + "\n".join(discord_stream_chunk)
+        try:
+            import requests as req 
+            req.post(DISCORD_WEBHOOK_URL, json={"content": stream_message})
+        except Exception as e:
+            log.error(f"Failed to stream to Discord: {e}")
 
 def main(start, end):
     start, end = int(start), int(end)
