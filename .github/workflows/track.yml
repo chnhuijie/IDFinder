@@ -70,7 +70,7 @@ jobs:
         run: python notify.py
 
   alert_on_failure:
-    name: Dead Man's Switch (Discord Alert)
+    name: Discord Alert
     needs: [scrape, cleanup_and_notify]
     if: failure()  
     runs-on: ubuntu-latest
@@ -80,5 +80,5 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           curl -H "Content-Type: application/json" \
-          -d "{\"content\": \" **ALERT:** The Trainer Tracker GitHub Action just failed! \\n\\n🔍 **Check the logs here:** <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}>\"}" \
+          -d "{\"content\": \" **ALERT:** The Trainer Tracker GitHub Action just failed! \\n\\n **Check logs here:** <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}>\"}" \
           $DISCORD_WEBHOOK_URL
