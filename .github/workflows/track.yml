@@ -1,19 +1,16 @@
-name: Trainer Tracker
+name: Trainer Tracker Pipeline
 
 on:
   schedule:
-    - cron: '10 10 * * *' 
-  workflow_dispatch:
-
-permissions:
-  contents: read
+    - cron: "10 15 * * *" # Runs daily at 11:10 PM GMT+8 (15:10 UTC)
+  workflow_dispatch:      # Allows manual trigger button on GitHub
 
 jobs:
   scrape:
+    name: Scrape Ranks ${{ matrix.start }}-${{ matrix.end }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     strategy:
-      fail-fast: false
+      fail-fast: false  
       matrix:
         include:
           - start: 0
@@ -26,52 +23,61 @@ jobs:
             end: 400
           - start: 400
             end: 500
+
     steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install Python Dependencies
-        run: pip install pymongo curl_cffi requests
+      - name: Install Dependencies
+        run: pip install curl_cffi pymongo
 
-      - name: Humanized Initial Jitter Delay
-        run: |
-          JITTER_TIME=$((10 + RANDOM % 81))
-          echo "⏱️ Jitter activated! Sleeping for $JITTER_TIME seconds..."
-          sleep $JITTER_TIME
-          echo "🚀 Cooldown over. Launching stream chunk!"
-
-      - name: Sync Batch
-        run: python main.py ${{ matrix.start }} ${{ matrix.end }} 
+      - name: Run Scraper (With Auto-Retry)
+        uses: nick-fields/retry@v3
         env:
-          MONGO_URI: ${{ secrets.MONGO_URI }} 
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+        with:
+          timeout_minutes: 15
+          max_attempts: 3            
+          retry_wait_seconds: 30    
+          command: python main.py ${{ matrix.start }} ${{ matrix.end }}
 
   cleanup_and_notify:
+    name: Final Leaver Check and Transfer Analysis
     needs: scrape
-    if: success()
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }} 
-      
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          
-      - name: Install Python Dependencies
-        run: pip install pymongo requests
-      
-      - name: Final Leaver Check and Transfer Analysis
-        run: python notify.py
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: pip install requests pymongo
+
+      - name: Run notify.py
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python notify.py
+
+  alert_on_failure:
+    name: Dead Man's Switch (Discord Alert)
+    needs: [scrape, cleanup_and_notify]
+    if: failure()  
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Failure Ping to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          curl -H "Content-Type: application/json" \
+          -d "{\"content\": \" **ALERT:** The Trainer Tracker GitHub Action just failed! \\n\\n🔍 **Check the logs here:** <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}>\"}" \
+          $DISCORD_WEBHOOK_URL
