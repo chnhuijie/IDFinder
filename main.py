@@ -118,6 +118,8 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
             
             if ops: 
                 db.bulk_write(ops, ordered=False)
+
+                active_count = club.get("member_count") or detail.get("circle", {}).get("member_count") or "??"
                 
                 log_line = (f"**Synced:** `{club_name}` (Rank {absolute_club_rank + 1}) | Scanned: {len(ops)} profiles")
                 
