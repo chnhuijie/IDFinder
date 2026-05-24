@@ -8,6 +8,7 @@ def process_post_scan_transfers():
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
     clubs_col = client["uma_tracker"]["clubs"]
+    db.create_index([("last_seen", 1)]) 
     
     cutoff_time = time.time() - 14400
     
