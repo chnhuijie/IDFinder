@@ -34,7 +34,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Dependencies
-        run: pip install curl_cffi pymongo
+        run: pip install curl_cffi pymongo requests
 
       - name: Run Scraper (With Auto-Retry)
         uses: nick-fields/retry@v3
