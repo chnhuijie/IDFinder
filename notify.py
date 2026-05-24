@@ -54,21 +54,21 @@ def process_post_scan_transfers():
     messages = []
 
     if top250_leavers:
-        messages.append("⚠️ **Top 250 Elite Leavers / Free Agents Spotted**")
-        messages.append("*Left their club and dropped completely off the leaderboard grid:*")
+        messages.append("**Top 250 Club Leavers Detected**")
+        messages.append("*Left their club and dropped completely off the leaderboard:*")
         for leaver in sorted(top250_leavers, key=lambda x: x['rank']):
             messages.append(f"  • `ID: {leaver['id']}` | **{leaver['name']}** left **{leaver['old_club']}** (Rank {leaver['rank']})")
         messages.append("")
 
     if new_players:
-        messages.append(f"🆕 **{len(new_players)}** new players entered the tracking pool.")
+        messages.append(f"**{len(new_players)}** new players entered the tracking pool.")
         sorted_new_clubs = sorted(new_clubs_dict.items(), key=lambda x: x[1], reverse=True)
         for club, count in sorted_new_clubs[:15]:
             messages.append(f"  • **{club}**: +{count} new player(s)")
         messages.append("")
 
     if transfers:
-        messages.append(f"🔄 **{len(transfers)}** players moved between tracked clubs.")
+        messages.append(f"**{len(transfers)}** players moved between tracked clubs.")
         sorted_shift_clubs = sorted(shift_clubs_dict.items(), key=lambda x: x[1], reverse=True)
         for club, count in sorted_shift_clubs[:15]:
             messages.append(f"  • **{club}**: +{count} transferred player(s)")
