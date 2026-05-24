@@ -119,7 +119,8 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
             if ops: 
                 db.bulk_write(ops, ordered=False)
                 
-                log.info(f"**Synced:** `{club_name}` (Rank {absolute_club_rank + 1}) | Scanned: {len(ops)} profiles")
+                log_line = (f"**Synced:** `{club_name}` (Rank {absolute_club_rank + 1}) | Scanned: {len(ops)} profiles")
+                
                 log.info(log_line)
                 discord_stream_chunk.append(log_line)
                 
