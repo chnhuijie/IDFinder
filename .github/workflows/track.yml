@@ -2,7 +2,7 @@ name: Trainer Tracker Pipeline
 
 on:
   schedule:
-    - cron: "10 15 * * *" # Runs daily at 11:10 PM GMT+8 (15:10 UTC)
+    - cron: "10 10 * * *" # Runs daily at 11:10 PM GMT+8 (15:10 UTC)
   workflow_dispatch:      # Allows manual trigger button on GitHub
 
 jobs:
