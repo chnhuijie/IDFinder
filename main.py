@@ -129,7 +129,7 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
     client.close()
 
     if discord_stream_chunk and DISCORD_WEBHOOK_URL:
-        stream_message = f"📡 **Data Stream: Ranks {batch_start + 1} to {batch_end}**\n" + "\n".join(discord_stream_chunk)
+        stream_message = f"**Data Stream: Ranks {batch_start + 1} to {batch_end}**\n" + "\n".join(discord_stream_chunk)
         try:
             import requests as req 
             req.post(DISCORD_WEBHOOK_URL, json={"content": stream_message})
