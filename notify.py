@@ -1,5 +1,7 @@
-import os, time, requests
-from pymongo import MongoClient, UpdateOne
+import os
+import time
+import requests
+from pymongo import MongoClient
 
 MONGO_URI = os.getenv("MONGO_URI")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
@@ -8,139 +10,70 @@ def process_post_scan_transfers():
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
     clubs_col = client["uma_tracker"]["clubs"]
-    db.create_index([("last_seen", 1)]) 
+    
+    # Core performance enforcement index
+    db.create_index([("last_seen", 1)])
     
     cutoff_time = time.time() - 14400
     
-    total_historic_clubs = clubs_col.count_documents({})
-    is_first_scale_run = total_historic_clubs < 450 
-    
-    dropped_clubs = []
-    new_clubs = []
-    
-    if not is_first_scale_run:
-        dropped_clubs_cursor = list(clubs_col.find({"last_updated": {"$lte": cutoff_time}}))
-        if dropped_clubs_cursor:
-            dropped_ids = []
-            for c in dropped_clubs_cursor:
-                dropped_clubs.append({
-                    "name": c.get("name"),
-                    "old_rank": c.get("last_known_rank", 999) + 1
-                })
-                dropped_ids.append(c["_id"])
-            clubs_col.delete_many({"_id": {"$in": dropped_ids}})
-
-        active_clubs_meta = list(clubs_col.find({"last_updated": {"$gt": cutoff_time}}))
-        for c in active_clubs_meta:
-            club_name = c.get("name")
-            club_id = c.get("circle_id")
-            if club_name and club_id:
-                if c.get("last_updated", 0) <= cutoff_time:
-                    has_tracked_members = db.find_one({"club_id": club_id, "club_tier": {"$ne": "Unranked"}})
-                    if not has_tracked_members:
-                        new_clubs.append({
-                            "name": club_name,
-                            "current_rank": c.get("last_known_rank", 0) + 1
-                        })
-    else:
-        print("Seed Run: Establishing foundation rows. Skipping structural flux alerts.")
-
-    print("Pre-fetching leaderboard club rankings into local cache...")
-    all_clubs_cursor = clubs_col.find({})
-    club_cache = {c.get("circle_id"): c for c in all_clubs_cursor if c.get("circle_id")}
-
-    missing_players = list(db.find({"last_seen": {"$lte": cutoff_time}}))
+    # 1. 🕵️‍♂️ Process True Elite Grid Leavers (Lookups cached via local index scan)
+    missing_players = list(db.find({"last_seen": {"$lte": cutoff_time}, "club_id": {"$ne": None}}))
     top250_leavers = []
-    leaver_ops = []
     
     for player in missing_players:
-        prev_club_name = player.get("club")
-        prev_club_id = player.get("club_id")
-        p_id = player.get("mid")
-        p_name = player.get("name") or "Unknown"
+        club_data = clubs_col.find_one({"circle_id": player.get("club_id")})
+        if club_data and club_data.get("last_known_rank", 999) < 250:
+            top250_leavers.append({
+                "id": player.get("mid"),
+                "name": player.get("name", "Unknown"),
+                "old_club": player.get("club"),
+                "rank": club_data.get("last_known_rank", 0) + 1
+            })
+            # Drop club associations since they are officially free agents off the leaderboard grid
+            db.update_one(
+                {"_id": player["_id"]}, 
+                {"$set": {"club": None, "club_id": None, "previous_club": None, "club_tier": "Unranked"}}
+            )
+
+    # 2. 📊 Gather operational flags compiled by the parallel nodes
+    new_players = list(db.find({"last_seen": {"$gt": cutoff_time}, "is_new_flag": True}))
+    transfers = list(db.find({"last_seen": {"$gt": cutoff_time}, "is_transfer_flag": True}))
+
+    if not DISCORD_WEBHOOK_URL: 
+        client.close()
+        return
         
-        if prev_club_id:
-            club_data = club_cache.get(prev_club_id)
-            if club_data:
-                last_rank = club_data.get("last_known_rank", 999)
-                if last_rank < 250:
-                    top250_leavers.append({
-                        "id": p_id,
-                        "name": p_name,
-                        "old_club": prev_club_name,
-                        "rank": last_rank + 1
-                    })
-                    
-                    leaver_ops.append(UpdateOne(
-                        {"_id": player["_id"]},
-                        {"$set": {"previous_club": None, "club": None, "club_id": None, "club_tier": "Unranked"}}
-                    ))
-                    
-    if leaver_ops:
-        db.bulk_write(leaver_ops, ordered=False)
-
-    active_players = list(db.find({"last_seen": {"$gt": cutoff_time}}))
-    
-    new_count = 0
-    shift_count = 0
-    new_clubs_dict = {}
-    shift_clubs_dict = {}
-    player_ops = []
-    
-    for player in active_players:
-        current_club = player.get("club")
-        previous_club = player.get("previous_club")
-        
-        if not previous_club:
-            new_count += 1
-            new_clubs_dict[current_club] = new_clubs_dict.get(current_club, 0) + 1
-            player_ops.append(UpdateOne({"_id": player["_id"]}, {"$set": {"previous_club": current_club}}))
-            
-        elif previous_club != current_club:
-            shift_count += 1
-            shift_clubs_dict[current_club] = shift_clubs_dict.get(current_club, 0) + 1
-            player_ops.append(UpdateOne({"_id": player["_id"]}, {"$set": {"previous_club": current_club}}))
-
-    if player_ops:
-        print(f"📦 Committing bulk execution updates for {len(player_ops)} active profiles...")
-        db.bulk_write(player_ops, ordered=False)
-
-    if not DISCORD_WEBHOOK_URL: return
     messages = []
-    
-    if (dropped_clubs or new_clubs) and not is_first_scale_run:
-        messages.append("📊 **Leaderboard Structural Changes Spotted**")
-        for dc in sorted(dropped_clubs, key=lambda x: x['old_rank']):
-            messages.append(f"  • 🟥 **{dc['name']}** has **dropped completely out** of the Top 500 (Was Rank {dc['old_rank']})")
-        for nc in sorted(new_clubs, key=lambda x: x['current_rank']):
-            messages.append(f"  • 🟩 **{nc['name']}** has **entered the Top 500** leaderboard grid (Currently Rank {nc['current_rank']})")
-        messages.append("")
 
+    # 3. 📢 Format Data Bundles
     if top250_leavers:
         messages.append("⚠️ **Top 250 Elite Leavers / Free Agents Spotted**")
         messages.append("*Left their club and dropped completely off the leaderboard grid:*")
         for leaver in sorted(top250_leavers, key=lambda x: x['rank']):
             messages.append(f"  • `ID: {leaver['id']}` | **{leaver['name']}** left **{leaver['old_club']}** (Rank {leaver['rank']})")
-        messages.append("") 
+        messages.append("")
 
-    if new_count > 0 and not is_first_scale_run:
-        messages.append(f"🆕 **{new_count}** new players entered the tracking pool.")
-        for club, count in sorted(new_clubs_dict.items(), key=lambda x: x[1], reverse=True)[:15]:
-            messages.append(f"  • **{club}**: +{count} new player(s)")
-            
-    if shift_count > 0:
-        messages.append(f"\n🔄 **{shift_count}** players moved between tracked clubs.")
-        for club, count in sorted(shift_clubs_dict.items(), key=lambda x: x[1], reverse=True)[:15]:
-            messages.append(f"  • **{club}**: +{count} transferred player(s)")
-            
+    if new_players:
+        messages.append(f"🆕 **{len(new_players)}** new trainers entered the tracking pool.")
+    if transfers:
+        messages.append(f"🔄 **{len(transfers)}** roster transfers detected between tracked clubs.")
+
+    # 4. 🔥 Deliver Content and Reset Environment Flags Safe Layer
     if messages:
-        full_message = "\n".join(messages)
-        if len(full_message) > 1900:
-            chunks = [messages[i:i + 20] for i in range(0, len(messages), 20)]
-            for chunk in chunks:
-                requests.post(DISCORD_WEBHOOK_URL, json={"content": "\n".join(chunk)})
-        else:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": full_message})
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": "\n".join(messages)})
+        print("📢 Discord notification successfully delivered!")
+
+        print("🧼 Wiping temporary operational flags and snapshots for tomorrow's run...")
+        db.update_many(
+            {"last_seen": {"$gt": cutoff_time}}, 
+            {"$set": {
+                "is_new_flag": False, 
+                "is_transfer_flag": False,
+                "historical_club_snapshot": None
+            }}
+        )
+    else:
+        print("💤 No roster movements detected tonight. Operational flags intact.")
 
     client.close()
 
