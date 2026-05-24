@@ -47,7 +47,6 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
         absolute_club_rank = batch_start + index 
         cid, club_name = club.get("circle_id"), club.get("name")
         
-        # Keep tracking nodes mapped cleanly
         club_rank_collection.update_one(
             {"circle_id": cid},
             {"$set": {"name": club_name, "last_known_rank": absolute_club_rank, "last_updated": time.time()}},
@@ -77,7 +76,6 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                     is_transfer = False
                     is_new_pool = True
                 else:
-                    # CROSS-WORKER RECOVERY LAYER: Use snapshot baseline if touched by another node tonight
                     if current_player_state.get("last_run_id") == run_id:
                         old_tracked_club = current_player_state.get("historical_club_snapshot")
                     else:
@@ -93,7 +91,6 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                         is_transfer = False
                         is_new_pool = False
 
-                # Build the dynamic payload mapping
                 update_payload = {
                     "name": p_name, 
                     "club": club_name,
@@ -103,10 +100,10 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                     "is_new_flag": is_new_pool,
                     "club_tier": tier_label,
                     "last_seen": time.time(),
+                    "updated_at": datetime.datetime.now(datetime.timezone.utc), 
                     "last_run_id": run_id
                 }
 
-                # Preserve the historical source record if this is the first scan pass of the night
                 if not current_player_state or current_player_state.get("last_run_id") != run_id:
                     update_payload["historical_club_snapshot"] = current_player_state.get("club") if current_player_state else None
 
@@ -127,7 +124,6 @@ def main(start, end):
     now_dt = datetime.datetime.now()
     curr_year, curr_month = now_dt.year, now_dt.month
     
-    # Establish unified global Run ID footprint
     run_id = f"{curr_year}-{curr_month:02d}-{now_dt.day:02d}"
     
     session.get("https://uma.moe/ranking", impersonate="chrome120")
