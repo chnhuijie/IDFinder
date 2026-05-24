@@ -9,11 +9,18 @@ def process_post_scan_transfers():
     db = client["uma_tracker"]["members"]
     clubs_col = client["uma_tracker"]["clubs"]
     
+    # 🕒 4-Hour Safety Cutoff Window 
     cutoff_time = time.time() - 14400
     
+    # ------------------------------------------------------------------
+    # 📊 SEED RUN PROTECTION CHECK
+    # ------------------------------------------------------------------
     total_historic_clubs = clubs_col.count_documents({})
     is_first_scale_run = total_historic_clubs < 450 
     
+    # ------------------------------------------------------------------
+    # 🏰 CLUB LEADERBOARD FLUX DETECTOR
+    # ------------------------------------------------------------------
     dropped_clubs = []
     new_clubs = []
     
@@ -44,6 +51,17 @@ def process_post_scan_transfers():
     else:
         print("🌱 Seed Run: Establishing foundation rows. Skipping structural flux alerts.")
 
+    # ------------------------------------------------------------------
+    # ⚡ NEW OPTIMIZATION: PRE-FETCH ALL CLUBS INTO MEMORY MAP
+    # ------------------------------------------------------------------
+    # Pull all clubs in 1 single network query and map them by circle_id
+    print("⚡ Pre-fetching leaderboard club rankings into local cache...")
+    all_clubs_cursor = clubs_col.find({})
+    club_cache = {c.get("circle_id"): c for c in all_clubs_cursor if c.get("circle_id")}
+
+    # ------------------------------------------------------------------
+    # 🕵️‍♂️ TARGETED TOP 250 LEAVER DETECTOR (RAM Lookup Optimized)
+    # ------------------------------------------------------------------
     missing_players = list(db.find({"last_seen": {"$lte": cutoff_time}}))
     top250_leavers = []
     leaver_ops = []
@@ -55,7 +73,8 @@ def process_post_scan_transfers():
         p_name = player.get("name") or "Unknown"
         
         if prev_club_id:
-            club_data = clubs_col.find_one({"circle_id": prev_club_id})
+            # ⚡ INSTANT RAM LOOKUP: Replaced the slow clubs_col.find_one network query
+            club_data = club_cache.get(prev_club_id)
             if club_data:
                 last_rank = club_data.get("last_known_rank", 999)
                 if last_rank < 250:
@@ -74,6 +93,9 @@ def process_post_scan_transfers():
     if leaver_ops:
         db.bulk_write(leaver_ops, ordered=False)
 
+    # ------------------------------------------------------------------
+    # 🔄 ACTIVE TRANSFER & NEW PLAYER METRICS
+    # ------------------------------------------------------------------
     active_players = list(db.find({"last_seen": {"$gt": cutoff_time}}))
     
     new_count = 0
@@ -84,7 +106,6 @@ def process_post_scan_transfers():
     
     for player in active_players:
         current_club = player.get("club")
-        current_club_id = player.get("club_id")
         previous_club = player.get("previous_club")
         
         if not previous_club:
@@ -100,7 +121,10 @@ def process_post_scan_transfers():
     if player_ops:
         print(f"📦 Committing bulk execution updates for {len(player_ops)} active profiles...")
         db.bulk_write(player_ops, ordered=False)
-        
+
+    # ------------------------------------------------------------------
+    # 📢 CONSOLIDATED DISCORD REPORTING BROADCAST
+    # ------------------------------------------------------------------
     if not DISCORD_WEBHOOK_URL: return
     messages = []
     
