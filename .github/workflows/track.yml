@@ -40,6 +40,7 @@ jobs:
         uses: nick-fields/retry@v3
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         with:
           timeout_minutes: 30
           max_attempts: 3            
