@@ -2,6 +2,7 @@ name: Trainer Tracker
 
 on:
   schedule:
+    - cron: "12 15 * * *"
   workflow_dispatch:     
 
 jobs:
