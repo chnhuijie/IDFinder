@@ -92,10 +92,17 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
 
                 p_name = m.get("name") or m.get("nickname") or "Unknown"
                 tier_label = "Top 100" if absolute_club_rank < 100 else ("Top 200" if absolute_club_rank < 200 else "Top 500")
+                
+                jst_tz = datetime.timezone(datetime.timedelta(hours=9))
+                current_calendar_day = datetime.datetime.now(jst_tz).day
 
                 current_player_state = db.find_one({"mid": p_id})
                 
                 if not current_player_state:
+                    if current_calendar_day > 4 and current_club_active_day > 0:
+                        if (current_calendar_day - current_club_active_day) > 3:
+                            continue 
+                            
                     prev_club = None
                     is_transfer = False
                     is_new_pool = True
@@ -103,6 +110,8 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                     db_active_day = current_player_state.get("last_active_day", -1)
                     db_active_month = current_player_state.get("last_active_month", -1)
 
+                    # 🛑 VELOCITY GATE
+                    # Blocks stale ghost data from overwriting fresh data
                     if db_active_month == curr_month and current_club_active_day < db_active_day:
                         continue
 
@@ -118,8 +127,6 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                         is_transfer = True
                         is_new_pool = False
                         
-                        jst_tz = datetime.timezone(datetime.timedelta(hours=9))
-                        current_calendar_day = datetime.datetime.now(jst_tz).day
                         days_since_old_activity = current_calendar_day - db_active_day
                         
                         if db_active_day > 0 and db_active_month == curr_month and days_since_old_activity > 3:
