@@ -1,10 +1,32 @@
 import os
 import time
 import requests
-from pymongo import MongoClient
+from collections import Counter
+from pymongo import MongoClient, UpdateOne
 
 MONGO_URI = os.getenv("MONGO_URI")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+
+def send_discord_in_chunks(webhook_url, messages):
+    """
+    Safely bundles lines of text into chunks under 1900 characters
+    to completely prevent Discord HTTP 400 payload errors.
+    """
+    current_chunk = []
+    current_length = 0
+
+    for line in messages:
+        if current_length + len(line) + 1 > 1900:
+            requests.post(webhook_url, json={"content": "\n".join(current_chunk)})
+            time.sleep(1.5)  
+            current_chunk = [line]
+            current_length = len(line)
+        else:
+            current_chunk.append(line)
+            current_length += len(line) + 1
+
+    if current_chunk:
+        requests.post(webhook_url, json={"content": "\n".join(current_chunk)})
 
 def process_post_scan_transfers():
     client = MongoClient(MONGO_URI)
@@ -19,33 +41,37 @@ def process_post_scan_transfers():
     missing_players = list(db.find({"last_seen": {"$lte": cutoff_time}, "club_id": {"$ne": None}}))
     top250_leavers = []
     
-    for player in missing_players:
-        club_data = clubs_col.find_one({"circle_id": player.get("club_id")})
-        if club_data and club_data.get("last_known_rank", 999) < 250:
-            top250_leavers.append({
-                "id": player.get("mid"),
-                "name": player.get("name", "Unknown"),
-                "old_club": player.get("club"),
-                "rank": club_data.get("last_known_rank", 0) + 1
-            })
-            db.update_one(
-                {"_id": player["_id"]}, 
-                {"$set": {"club": None, "club_id": None, "previous_club": None, "club_tier": "Unranked"}}
-            )
+    if missing_players:
+        unique_club_ids = list(set(p.get("club_id") for p in missing_players if p.get("club_id")))
+        clubs_data = list(clubs_col.find({"circle_id": {"$in": unique_club_ids}}))
+        
+        clubs_map = {c["circle_id"]: c.get("last_known_rank", 999) for c in clubs_data}
+        bulk_updates = []
+        
+        for player in missing_players:
+            club_id = player.get("club_id")
+            last_rank = clubs_map.get(club_id, 999)
+            
+            if last_rank < 250:
+                top250_leavers.append({
+                    "id": player.get("mid"),
+                    "name": player.get("name", "Unknown"),
+                    "old_club": player.get("club"),
+                    "rank": last_rank + 1
+                })
+                bulk_updates.append(UpdateOne(
+                    {"_id": player["_id"]}, 
+                    {"$set": {"club": None, "club_id": None, "previous_club": None, "club_tier": "Unranked"}}
+                ))
+        
+        if bulk_updates:
+            db.bulk_write(bulk_updates, ordered=False)
 
-    new_players = list(db.find({"last_seen": {"$gt": cutoff_time}, "is_new_flag": True}))
-    transfers = list(db.find({"last_seen": {"$gt": cutoff_time}, "is_transfer_flag": True}))
+    new_players = list(db.find({"last_seen": {"$gt": cutoff_time}, "is_new_flag": True}, {"club": 1}))
+    transfers = list(db.find({"last_seen": {"$gt": cutoff_time}, "is_transfer_flag": True}, {"club": 1}))
 
-    new_clubs_dict = {}
-    shift_clubs_dict = {}
-
-    for p in new_players:
-        club_name = p.get("club", "Unknown Club")
-        new_clubs_dict[club_name] = new_clubs_dict.get(club_name, 0) + 1
-
-    for p in transfers:
-        club_name = p.get("club", "Unknown Club")
-        shift_clubs_dict[club_name] = shift_clubs_dict.get(club_name, 0) + 1
+    new_clubs_dict = Counter(p.get("club", "Unknown Club") for p in new_players)
+    shift_clubs_dict = Counter(p.get("club", "Unknown Club") for p in transfers)
 
     if not DISCORD_WEBHOOK_URL: 
         client.close()
@@ -62,27 +88,17 @@ def process_post_scan_transfers():
 
     if new_players:
         messages.append(f"**{len(new_players)}** new players entered the tracking pool.")
-        sorted_new_clubs = sorted(new_clubs_dict.items(), key=lambda x: x[1], reverse=True)
-        for club, count in sorted_new_clubs[:15]:
+        for club, count in new_clubs_dict.most_common(15):
             messages.append(f"  • **{club}**: +{count} new player(s)")
         messages.append("")
 
     if transfers:
         messages.append(f"**{len(transfers)}** players moved between tracked clubs.")
-        sorted_shift_clubs = sorted(shift_clubs_dict.items(), key=lambda x: x[1], reverse=True)
-        for club, count in sorted_shift_clubs[:15]:
+        for club, count in shift_clubs_dict.most_common(15):
             messages.append(f"  • **{club}**: +{count} transferred player(s)")
 
     if messages:
-        full_message = "\n".join(messages)
-        if len(full_message) > 1900:
-            chunks = [messages[i:i + 20] for i in range(0, len(messages), 20)]
-            for chunk in chunks:
-                requests.post(DISCORD_WEBHOOK_URL, json={"content": "\n".join(chunk)})
-                time.sleep(1.5) 
-        else:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": full_message})
-            
+        send_discord_in_chunks(DISCORD_WEBHOOK_URL, messages)
         print("📢 Detailed Discord notification successfully delivered!")
 
         print("🧼 Wiping temporary operational flags and snapshots for tomorrow's run...")
