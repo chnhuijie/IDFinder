@@ -26,6 +26,24 @@ def safe_get(url):
         log.error(f"Request error: {e}")
     return None
 
+def get_latest_active_day(daily_fans):
+    """
+    Scans the 31-element array backwards to find the 
+    very last day the player actually gained fans.
+    Returns the calendar day (1-31).
+    """
+    if not daily_fans or len(daily_fans) < 2:
+        return 0
+        
+    for i in range(len(daily_fans) - 1, 0, -1):
+        if daily_fans[i] > daily_fans[i - 1]:
+            return i + 1 
+            
+    if daily_fans[0] > 0:
+        return 1
+        
+    return 0
+
 def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id):
     api_page = batch_start // 100
     api_start = batch_start % 100
@@ -66,9 +84,13 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
             for m in raw_members:
                 if not m: continue
                 p_id = str(m.get("viewer_id") or m.get("id") or "").strip()
-                if not p_id or p_id.lower() == "none" or m.get("left") is True: 
+                
+                if not p_id or p_id.lower() == "none": 
                     continue
                 
+                daily_fans = m.get("daily_fans", [])
+                current_club_active_day = get_latest_active_day(daily_fans)
+
                 p_name = m.get("name") or m.get("nickname") or "Unknown"
                 tier_label = "Top 100" if absolute_club_rank < 100 else ("Top 200" if absolute_club_rank < 200 else "Top 500")
 
@@ -79,6 +101,12 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                     is_transfer = False
                     is_new_pool = True
                 else:
+                    db_active_day = current_player_state.get("last_active_day", -1)
+                    db_active_month = current_player_state.get("last_active_month", -1)
+
+                    if db_active_month == curr_month and current_club_active_day < db_active_day:
+                        continue
+
                     if current_player_state.get("last_run_id") == run_id:
                         old_tracked_club = current_player_state.get("historical_club_snapshot")
                     else:
@@ -90,6 +118,13 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                         prev_club = old_tracked_club
                         is_transfer = True
                         is_new_pool = False
+                        
+                        current_calendar_day = datetime.datetime.now().day
+                        days_since_old_activity = current_calendar_day - db_active_day
+                        
+                        if db_active_day > 0 and db_active_month == curr_month and days_since_old_activity > 3:
+                            is_transfer = False
+                            
                     else:
                         is_transfer = False
                         is_new_pool = False
@@ -104,7 +139,9 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                     "club_tier": tier_label,
                     "last_seen": time.time(),
                     "updated_at": datetime.datetime.now(datetime.timezone.utc),
-                    "last_run_id": run_id
+                    "last_run_id": run_id,
+                    "last_active_day": current_club_active_day,  
+                    "last_active_month": curr_month            
                 }
 
                 if not current_player_state or current_player_state.get("last_run_id") != run_id:
