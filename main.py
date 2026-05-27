@@ -29,8 +29,7 @@ def safe_get(url):
 def get_latest_active_day(daily_fans):
     """
     Scans the 31-element array backwards to find the 
-    very last day the player actually gained fans.
-    Returns the calendar day (1-31).
+    very last calendar day (1-31) the player gained fans.
     """
     if not daily_fans or len(daily_fans) < 2:
         return 0
@@ -119,7 +118,8 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                         is_transfer = True
                         is_new_pool = False
                         
-                        current_calendar_day = datetime.datetime.now().day
+                        jst_tz = datetime.timezone(datetime.timedelta(hours=9))
+                        current_calendar_day = datetime.datetime.now(jst_tz).day
                         days_since_old_activity = current_calendar_day - db_active_day
                         
                         if db_active_day > 0 and db_active_month == curr_month and days_since_old_activity > 3:
@@ -140,8 +140,8 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                     "last_seen": time.time(),
                     "updated_at": datetime.datetime.now(datetime.timezone.utc),
                     "last_run_id": run_id,
-                    "last_active_day": current_club_active_day,  
-                    "last_active_month": curr_month            
+                    "last_active_day": current_club_active_day, 
+                    "last_active_month": curr_month              
                 }
 
                 if not current_player_state or current_player_state.get("last_run_id") != run_id:
@@ -175,7 +175,10 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
 
 def main(start, end):
     start, end = int(start), int(end)
-    now_dt = datetime.datetime.now()
+    
+    jst_tz = datetime.timezone(datetime.timedelta(hours=9))
+    now_dt = datetime.datetime.now(jst_tz)
+    
     curr_year, curr_month = now_dt.year, now_dt.month
     
     run_id = f"{curr_year}-{curr_month:02d}-{now_dt.day:02d}"
