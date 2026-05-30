@@ -8,10 +8,6 @@ MONGO_URI = os.getenv("MONGO_URI")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 def send_discord_in_chunks(webhook_url, messages):
-    """
-    Safely bundles lines of text into chunks under 1900 characters
-    to completely prevent Discord HTTP 400 payload errors.
-    """
     current_chunk = []
     current_length = 0
 
@@ -37,14 +33,12 @@ def process_post_scan_transfers():
     db.create_index([("updated_at", 1)], expireAfterSeconds=2592000)
     
     cutoff_time = time.time() - 14400
-    
     missing_players = list(db.find({"last_seen": {"$lte": cutoff_time}, "club_id": {"$ne": None}}))
     top250_leavers = []
     
     if missing_players:
         unique_club_ids = list(set(p.get("club_id") for p in missing_players if p.get("club_id")))
         clubs_data = list(clubs_col.find({"circle_id": {"$in": unique_club_ids}}))
-        
         clubs_map = {c["circle_id"]: c.get("last_known_rank", 999) for c in clubs_data}
         bulk_updates = []
         
@@ -100,14 +94,14 @@ def process_post_scan_transfers():
     if messages:
         send_discord_in_chunks(DISCORD_WEBHOOK_URL, messages)
         print("📢 Detailed Discord notification successfully delivered!")
-
         print("🧼 Wiping temporary operational flags and snapshots for tomorrow's run...")
         db.update_many(
             {"last_seen": {"$gt": cutoff_time}}, 
             {"$set": {
                 "is_new_flag": False, 
                 "is_transfer_flag": False,
-                "historical_club_snapshot": None
+                "historical_club_snapshot": None,
+                "historical_club_id_snapshot": None
             }}
         )
     else:
