@@ -110,25 +110,22 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                     db_active_day = current_player_state.get("last_active_day", -1)
                     db_active_month = current_player_state.get("last_active_month", -1)
 
-                    # 🛑 VELOCITY GATE
-                    # Blocks stale ghost data from overwriting fresh data
                     if db_active_month == curr_month and current_club_active_day < db_active_day:
                         continue
 
                     if current_player_state.get("last_run_id") == run_id:
-                        old_tracked_club = current_player_state.get("historical_club_snapshot")
+                        old_tracked_club_id = current_player_state.get("historical_club_id_snapshot")
                     else:
-                        old_tracked_club = current_player_state.get("club")
+                        old_tracked_club_id = current_player_state.get("club_id")
 
                     prev_club = current_player_state.get("previous_club")
                     
-                    if old_tracked_club and old_tracked_club != club_name:
-                        prev_club = old_tracked_club
+                    if old_tracked_club_id and old_tracked_club_id != cid:
+                        prev_club = current_player_state.get("club")
                         is_transfer = True
                         is_new_pool = False
                         
                         days_since_old_activity = current_calendar_day - db_active_day
-                        
                         if db_active_day > 0 and db_active_month == curr_month and days_since_old_activity > 3:
                             is_transfer = False
                             
@@ -153,6 +150,7 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
 
                 if not current_player_state or current_player_state.get("last_run_id") != run_id:
                     update_payload["historical_club_snapshot"] = current_player_state.get("club") if current_player_state else None
+                    update_payload["historical_club_id_snapshot"] = current_player_state.get("club_id") if current_player_state else None
 
                 ops.append(UpdateOne(
                     {"mid": p_id},
@@ -162,11 +160,9 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
             
             if ops: 
                 db.bulk_write(ops, ordered=False)
-                
                 active_count = club.get("member_count") or detail.get("circle", {}).get("member_count") or "??"
                 
                 log_line = f"**Synced:** `{club_name}` (Rank {absolute_club_rank + 1}) | Active: {active_count}/30"
-                
                 log.info(log_line)
                 discord_stream_chunk.append(log_line)
                 
@@ -182,12 +178,9 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
 
 def main(start, end):
     start, end = int(start), int(end)
-    
     jst_tz = datetime.timezone(datetime.timedelta(hours=9))
     now_dt = datetime.datetime.now(jst_tz)
-    
     curr_year, curr_month = now_dt.year, now_dt.month
-    
     run_id = f"{curr_year}-{curr_month:02d}-{now_dt.day:02d}"
     
     session.get("https://uma.moe/ranking", impersonate="chrome120")
