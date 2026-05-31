@@ -96,8 +96,8 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                 p_name = m.get("name") or m.get("nickname") or "Unknown"
                 tier_label = "Top 100" if absolute_club_rank < 100 else ("Top 200" if absolute_club_rank < 200 else "Top 500")
                 
-                jst_tz = datetime.timezone(datetime.timedelta(hours=9))
-                current_calendar_day = datetime.datetime.now(jst_tz).day
+                global_tz = datetime.timezone(datetime.timedelta(hours=-15))
+                current_calendar_day = datetime.datetime.now(global_tz).day
 
                 current_player_state = db.find_one({"mid": p_id})
                 
@@ -182,8 +182,8 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
 def main(start, end):
     log.info(f"🚀 Starting Tracker Worker for Ranks {start}-{end}...")
     start, end = int(start), int(end)
-    jst_tz = datetime.timezone(datetime.timedelta(hours=9))
-    now_dt = datetime.datetime.now(jst_tz)
+    global_tz = datetime.timezone(datetime.timedelta(hours=-15))
+    now_dt = datetime.datetime.now(global_tz)
     curr_year, curr_month = now_dt.year, now_dt.month
     run_id = f"{curr_year}-{curr_month:02d}-{now_dt.day:02d}"
     
