@@ -13,7 +13,7 @@ def send_discord_in_chunks(webhook_url, messages):
 
     for line in messages:
         if current_length + len(line) + 1 > 1900:
-            requests.post(webhook_url, json={"content": "\n".join(current_chunk)})
+            requests.post(webhook_url, json={"content": "\n".join(current_chunk)}, timeout=15)
             time.sleep(1.5)  
             current_chunk = [line]
             current_length = len(line)
@@ -22,7 +22,7 @@ def send_discord_in_chunks(webhook_url, messages):
             current_length += len(line) + 1
 
     if current_chunk:
-        requests.post(webhook_url, json={"content": "\n".join(current_chunk)})
+        requests.post(webhook_url, json={"content": "\n".join(current_chunk)}, timeout=15)
 
 def process_post_scan_transfers():
     client = MongoClient(MONGO_URI)
