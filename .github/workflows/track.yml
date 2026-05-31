@@ -1,5 +1,8 @@
 name: Trainer Tracker 
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 on:
   workflow_dispatch:     
 
@@ -39,6 +42,7 @@ jobs:
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PYTHONUNBUFFERED: "1"
         with:
           timeout_minutes: 30
           max_attempts: 3            
@@ -65,6 +69,7 @@ jobs:
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PYTHONUNBUFFERED: "1"
         run: python notify.py
 
   alert_on_failure:
