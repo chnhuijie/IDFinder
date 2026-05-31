@@ -19,16 +19,19 @@ session = requests.Session()
 def safe_get(url):
     time.sleep(random.uniform(3.0, 6.0)) 
     try:
-        # 1. TIMEOUT FIX
         res = session.get(url.rstrip('/'), impersonate="chrome120", timeout=30)
-        if res.status_code == 200: 
-            # 2. CLOUDFLARE FIX
+        if res.status_code == 200:
             if "application/json" not in res.headers.get("Content-Type", ""):
-                return None
+                log.error("🔴 CLOUDFLARE BLOCK DETECTED: Crashing worker to retry on a new IP...")
+                raise RuntimeError("Cloudflare Challenge Blocked the Request.")
             return res.json()
+            
+        log.error(f"🔴 API CONNECTION FAILED: Status {res.status_code}")
+        raise RuntimeError(f"Bad API status code: {res.status_code}")
+        
     except Exception as e:
-        log.error(f"Request error: {e}")
-    return None
+        log.error(f"🔴 CRITICAL NETWORK ERROR: {e}")
+        raise e
 
 def get_latest_active_day(daily_fans):
     if not daily_fans or len(daily_fans) < 2:
@@ -54,10 +57,10 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
     data = safe_get(url)
     
     if not data or "circles" not in data: 
-        return
+        raise RuntimeError("API payload missing circles context.")
 
     target_clubs = data["circles"][api_start:api_end]
-    client = MongoClient(MONGO_URI)
+    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=15000, socketTimeoutMS=15000)
     db = client["uma_tracker"]["members"]
     club_rank_collection = client["uma_tracker"]["clubs"]
     
@@ -112,8 +115,7 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
 
                     if db_active_month == curr_month and current_club_active_day < db_active_day:
                         continue
-                    
-                    # 3. IMMUTABLE ID FIX (Prevents the 30-player rename spam)
+
                     if current_player_state.get("last_run_id") == run_id:
                         old_tracked_club_id = current_player_state.get("historical_club_id_snapshot")
                     else:
@@ -178,6 +180,7 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
             log.error(f"Failed to stream to Discord: {e}")
 
 def main(start, end):
+    log.info(f"🚀 Starting Tracker Worker for Ranks {start}-{end}...")
     start, end = int(start), int(end)
     jst_tz = datetime.timezone(datetime.timedelta(hours=9))
     now_dt = datetime.datetime.now(jst_tz)
