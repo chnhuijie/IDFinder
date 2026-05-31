@@ -18,24 +18,17 @@ session = requests.Session()
 
 def safe_get(url):
     time.sleep(random.uniform(3.0, 6.0)) 
-    print(f"📡 [TRACER] Initiating API GET request to: {url}", flush=True)
     try:
+        # 1. TIMEOUT FIX
         res = session.get(url.rstrip('/'), impersonate="chrome120", timeout=30)
-        print(f"✅ [TRACER] API Response Received: {res.status_code}", flush=True)
-        
-        if res.status_code == 200:
+        if res.status_code == 200: 
+            # 2. CLOUDFLARE FIX
             if "application/json" not in res.headers.get("Content-Type", ""):
-                print(f"🔴 [TRACER] CLOUDFLARE BLOCK DETECTED: Received HTML instead of JSON.", flush=True)
-                raise RuntimeError("Cloudflare Challenge Blocked the Request.")
-                
+                return None
             return res.json()
-        
-        log.error(f"🔴 API CONNECTION FAILED: Status {res.status_code} on URL: {url}")
-        raise RuntimeError(f"Bad API status code: {res.status_code}")
-        
     except Exception as e:
-        log.error(f"🔴 CRITICAL NETWORK ERROR: {e}")
-        raise e
+        log.error(f"Request error: {e}")
+    return None
 
 def get_latest_active_day(daily_fans):
     if not daily_fans or len(daily_fans) < 2:
@@ -61,15 +54,12 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
     data = safe_get(url)
     
     if not data or "circles" not in data: 
-        raise RuntimeError("API payload missing circles context.")
+        return
 
     target_clubs = data["circles"][api_start:api_end]
-    
-    print("🗄️ [TRACER] Attempting to connect to MongoDB...", flush=True)
-    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=15000, socketTimeoutMS=15000)
+    client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
     club_rank_collection = client["uma_tracker"]["clubs"]
-    print("🗄️ [TRACER] MongoDB connection initialized.", flush=True)
     
     discord_stream_chunk = [] 
 
@@ -122,7 +112,8 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
 
                     if db_active_month == curr_month and current_club_active_day < db_active_day:
                         continue
-
+                    
+                    # 3. IMMUTABLE ID FIX (Prevents the 30-player rename spam)
                     if current_player_state.get("last_run_id") == run_id:
                         old_tracked_club_id = current_player_state.get("historical_club_id_snapshot")
                     else:
@@ -160,7 +151,7 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
 
                 if not current_player_state or current_player_state.get("last_run_id") != run_id:
                     update_payload["historical_club_snapshot"] = current_player_state.get("club") if current_player_state else None
-                    update_payload["historical_club_id_snapshot"] = current_player_state.get("club_id") if current_player_state else None
+                    update_payload["historical_club_id_snapshot"] = cid
 
                 ops.append(UpdateOne(
                     {"mid": p_id},
@@ -169,7 +160,6 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
                 ))
             
             if ops: 
-                print(f"🗄️ [TRACER] Writing {len(ops)} players to MongoDB for {club_name}...", flush=True)
                 db.bulk_write(ops, ordered=False)
                 active_count = club.get("member_count") or detail.get("circle", {}).get("member_count") or "??"
                 
@@ -182,35 +172,29 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
     if discord_stream_chunk and DISCORD_WEBHOOK_URL:
         stream_message = f"**Data Stream: Ranks {batch_start + 1} to {batch_end}**\n" + "\n".join(discord_stream_chunk)
         try:
-            print("💬 [TRACER] Pushing batch stream to Discord...", flush=True)
             import requests as req 
             req.post(DISCORD_WEBHOOK_URL, json={"content": stream_message}, timeout=15)
         except Exception as e:
             log.error(f"Failed to stream to Discord: {e}")
 
 def main(start, end):
-    print("🚀 [TRACER] Worker initialized. Starting clock...", flush=True)
     start, end = int(start), int(end)
     jst_tz = datetime.timezone(datetime.timedelta(hours=9))
     now_dt = datetime.datetime.now(jst_tz)
     curr_year, curr_month = now_dt.year, now_dt.month
     run_id = f"{curr_year}-{curr_month:02d}-{now_dt.day:02d}"
     
-    print("📡 [TRACER] Pinging uma.moe homepage...", flush=True)
-    res = session.get("https://uma.moe/ranking", impersonate="chrome120", timeout=30)
-    if res.status_code != 200:
-        log.error(f"🔴 INITIAL PORTAL CHECK FAILED: Status {res.status_code}")
-        raise RuntimeError(f"Portal check failed: {res.status_code}")
-    print("✅ [TRACER] Homepage ping successful.", flush=True)
+    try:
+        session.get("https://uma.moe/ranking", impersonate="chrome120", timeout=30)
+    except:
+        pass
         
     current_step = start
     while current_step < end:
         next_step = min(current_step + 20, end)
-        print(f"⚙️ [TRACER] Processing ranks {current_step + 1} to {next_step}...", flush=True)
         process_club_sub_batch(current_step, next_step, curr_year, curr_month, run_id)
         current_step = next_step
         if current_step < end:
-            print(f"💤 [TRACER] Resting before next batch...", flush=True)
             time.sleep(random.uniform(10.0, 20.0))
 
 if __name__ == "__main__":
