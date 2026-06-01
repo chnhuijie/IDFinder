@@ -66,14 +66,12 @@ def process_club_sub_batch(batch_start, batch_end, curr_year, curr_month, run_id
     
     discord_stream_chunk = [] 
 
-        for index, club in enumerate(target_clubs):
+    for index, club in enumerate(target_clubs):
         official_rank = club.get("rank")
         if official_rank:
             absolute_club_rank = official_rank - 1
         else:
             absolute_club_rank = batch_start + index 
-            
-        cid, club_name = club.get("circle_id"), club.get("name")
             
         cid, club_name = club.get("circle_id"), club.get("name")
         
