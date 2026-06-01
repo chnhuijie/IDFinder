@@ -74,11 +74,25 @@ def process_post_scan_transfers():
     messages = []
 
     if top250_leavers:
-        messages.append("**Top 250 Club Leavers Detected**")
-        messages.append("*Left their club and dropped completely off the leaderboard:*")
-        for leaver in sorted(top250_leavers, key=lambda x: x['rank']):
-            messages.append(f"  • `ID: {leaver['id']}` | **{leaver['name']}** left **{leaver['old_club']}** (Rank {leaver['rank']})")
-        messages.append("")
+        leaver_counts = Counter(leaver['old_club'] for leaver in top250_leavers)
+        dropped_clubs = [club for club, count in leaver_counts.items() if count >= 25]
+        individual_leavers = [leaver for leaver in top250_leavers if leaver['old_club'] not in dropped_clubs]
+
+        if dropped_clubs:
+            messages.append("**Club Dropoff Detected**")
+            messages.append("*The following clubs dropped completely off the Top 250 leaderboard:*")
+            for club in dropped_clubs:
+                club_rank = next((l['rank'] for l in top250_leavers if l['old_club'] == club), "??")
+                leaver_count = leaver_counts[club]
+                messages.append(f"  • **{club}** (Rank {club_rank}) | Lost tracking for {leaver_count} players.")
+            messages.append("")
+
+        if individual_leavers:
+            messages.append("**Top 250 Club Leavers Detected**")
+            messages.append("*Left their club and dropped completely off the leaderboard:*")
+            for leaver in sorted(individual_leavers, key=lambda x: x['rank']):
+                messages.append(f"  • `ID: {leaver['id']}` | **{leaver['name']}** left **{leaver['old_club']}** (Rank {leaver['rank']})")
+            messages.append("")
 
     if new_players:
         messages.append(f"**{len(new_players)}** new players entered the tracking pool.")
@@ -93,8 +107,6 @@ def process_post_scan_transfers():
 
     if messages:
         send_discord_in_chunks(DISCORD_WEBHOOK_URL, messages)
-        print("📢 Detailed Discord notification successfully delivered!")
-        print("🧼 Wiping temporary operational flags and snapshots for tomorrow's run...")
         db.update_many(
             {"last_seen": {"$gt": cutoff_time}}, 
             {"$set": {
@@ -104,8 +116,6 @@ def process_post_scan_transfers():
                 "historical_club_id_snapshot": None
             }}
         )
-    else:
-        print("💤 No roster movements detected tonight. Operational flags intact.")
 
     client.close()
 
