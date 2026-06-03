@@ -42,6 +42,7 @@ jobs:
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          UMA_API_KEY: ${{ secrets.UMA_API_KEY }}
           PYTHONUNBUFFERED: "1"
         with:
           timeout_minutes: 30
