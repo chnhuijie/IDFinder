@@ -51,6 +51,7 @@ def process_post_scan_transfers():
                     "id": player.get("mid"),
                     "name": player.get("name", "Unknown"),
                     "old_club": player.get("club"),
+                    "old_club_id": club_id, 
                     "rank": last_rank + 1
                 })
                 bulk_updates.append(UpdateOne(
@@ -61,11 +62,11 @@ def process_post_scan_transfers():
         if bulk_updates:
             db.bulk_write(bulk_updates, ordered=False)
 
-    new_players = list(db.find({"last_seen": {"$gt": cutoff_time}, "is_new_flag": True}, {"club": 1}))
-    transfers = list(db.find({"last_seen": {"$gt": cutoff_time}, "is_transfer_flag": True}, {"club": 1}))
+    new_players = list(db.find({"last_seen": {"$gt": cutoff_time}, "is_new_flag": True}, {"club": 1, "club_id": 1}))
+    transfers = list(db.find({"last_seen": {"$gt": cutoff_time}, "is_transfer_flag": True}, {"club": 1, "club_id": 1}))
 
-    new_clubs_dict = Counter(p.get("club", "Unknown Club") for p in new_players)
-    shift_clubs_dict = Counter(p.get("club", "Unknown Club") for p in transfers)
+    new_clubs_dict = Counter((p.get("club_id"), p.get("club", "Unknown Club")) for p in new_players)
+    shift_clubs_dict = Counter((p.get("club_id"), p.get("club", "Unknown Club")) for p in transfers)
 
     if not DISCORD_WEBHOOK_URL: 
         client.close()
@@ -74,17 +75,17 @@ def process_post_scan_transfers():
     messages = []
 
     if top250_leavers:
-        leaver_counts = Counter(leaver['old_club'] for leaver in top250_leavers)
-        dropped_clubs = [club for club, count in leaver_counts.items() if count >= 25]
-        individual_leavers = [leaver for leaver in top250_leavers if leaver['old_club'] not in dropped_clubs]
+        leaver_counts = Counter((leaver['old_club_id'], leaver['old_club']) for leaver in top250_leavers)
+        dropped_clubs = [club_tuple for club_tuple, count in leaver_counts.items() if count >= 25]
+        individual_leavers = [leaver for leaver in top250_leavers if (leaver['old_club_id'], leaver['old_club']) not in dropped_clubs]
 
         if dropped_clubs:
             messages.append("**Club Dropoff Detected**")
             messages.append("*The following clubs dropped completely off the Top 250 leaderboard:*")
-            for club in dropped_clubs:
-                club_rank = next((l['rank'] for l in top250_leavers if l['old_club'] == club), "??")
-                leaver_count = leaver_counts[club]
-                messages.append(f"  • **{club}** (Rank {club_rank}) | Lost tracking for {leaver_count} players.")
+            for club_id, club_name in dropped_clubs:
+                club_rank = next((l['rank'] for l in top250_leavers if l['old_club_id'] == club_id), "??")
+                leaver_count = leaver_counts[(club_id, club_name)]
+                messages.append(f"  • **{club_name}** (Rank {club_rank}) | Lost tracking for {leaver_count} players.")
             messages.append("")
 
         if individual_leavers:
@@ -96,14 +97,14 @@ def process_post_scan_transfers():
 
     if new_players:
         messages.append(f"**{len(new_players)}** new players entered the tracking pool.")
-        for club, count in new_clubs_dict.most_common(15):
-            messages.append(f"  • **{club}**: +{count} new player(s)")
+        for (club_id, club_name), count in new_clubs_dict.most_common(15):
+            messages.append(f"  • **{club_name}**: +{count} new player(s)")
         messages.append("")
 
     if transfers:
         messages.append(f"**{len(transfers)}** players moved between tracked clubs.")
-        for club, count in shift_clubs_dict.most_common(15):
-            messages.append(f"  • **{club}**: +{count} transferred player(s)")
+        for (club_id, club_name), count in shift_clubs_dict.most_common(15):
+            messages.append(f"  • **{club_name}**: +{count} transferred player(s)")
 
     if messages:
         send_discord_in_chunks(DISCORD_WEBHOOK_URL, messages)
