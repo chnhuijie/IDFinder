@@ -12,14 +12,29 @@ log = logging.getLogger(__name__)
 
 MONGO_URI = os.getenv("MONGO_URI")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL") 
+UMA_API_KEY = os.getenv("UMA_API_KEY") 
+
 BASE_API = "https://uma.moe/api/v4/circles"
 
 session = requests.Session()
 
 def safe_get(url):
     time.sleep(random.uniform(3.0, 6.0)) 
+    
+    custom_headers = {
+        "Accept": "application/json"
+    }
+    if UMA_API_KEY:
+        custom_headers["X-API-Key"] = UMA_API_KEY
+        
     try:
-        res = session.get(url.rstrip('/'), impersonate="chrome120", timeout=30)
+        res = session.get(
+            url.rstrip('/'), 
+            impersonate="chrome120", 
+            headers=custom_headers, 
+            timeout=30
+        )
+        
         if res.status_code == 200:
             if "application/json" not in res.headers.get("Content-Type", ""):
                 log.error("🔴 CLOUDFLARE BLOCK DETECTED: Crashing worker to retry on a new IP...")
@@ -191,11 +206,6 @@ def main(start, end):
     now_dt = datetime.datetime.now(global_tz)
     curr_year, curr_month = now_dt.year, now_dt.month
     run_id = f"{curr_year}-{curr_month:02d}-{now_dt.day:02d}"
-    
-    try:
-        session.get("https://uma.moe/ranking", impersonate="chrome120", timeout=30)
-    except:
-        pass
         
     current_step = start
     while current_step < end:
