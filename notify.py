@@ -48,7 +48,7 @@ def process_post_scan_transfers():
             club_id = player.get("club_id")
             club_details = clubs_info.get(club_id, {"rank": 999, "last_updated": 0})
             
-            if club_details["last_updated"] > cutoff_time:
+            if club_details["last_updated"] <= cutoff_time:
                 continue 
                 
             last_rank = club_details["rank"]
