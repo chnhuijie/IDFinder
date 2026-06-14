@@ -56,8 +56,9 @@ def process_club_sub_batch(api_start, api_end):
     slice_end = slice_start + (api_end - api_start)
     target_clubs = data["circles"][slice_start:slice_end]
     
+    # TRIPWIRE FALLBACK
     if len(target_clubs) == 0:
-        log.warning(f"⚠️ API List empty. Switching to Database Fallback Mode...")
+        log.warning(f" API List empty. Switching to Database Fallback Mode...")
         db_clubs = list(clubs_col.find({"last_known_rank": {"$gte": api_start + 1, "$lte": api_end}}).sort("last_known_rank", 1))
         if not db_clubs:
             client.close()
@@ -82,6 +83,8 @@ def process_club_sub_batch(api_start, api_end):
         club_name = club_summary.get("name")
         club_rank = club_summary.get("monthly_rank") or club_summary.get("live_rank") or 999
         
+        log.info(f"Scanning Club: {club_name} (ID: {c_id}, Rank: {club_rank})")
+        
         try:
             circle_data = safe_get(f"{BASE_API}?circle_id={c_id}")
         except Exception as e:
@@ -93,7 +96,6 @@ def process_club_sub_batch(api_start, api_end):
             
         club_info = circle_data.get("circle", {})
         
-        # GHOST MEMBER FILTER
         official_member_count = club_info.get("member_count")
         if official_member_count is not None:
             sorted_members = sorted(circle_data["members"], key=lambda x: x.get("last_updated") or "", reverse=True)
@@ -102,7 +104,6 @@ def process_club_sub_batch(api_start, api_end):
             club_updated_dt = dateutil.parser.isoparse(club_info.get("last_updated", "2000-01-01T00:00:00Z"))
             active_members = [m for m in circle_data["members"] if m.get("last_updated") and (club_updated_dt - dateutil.parser.isoparse(m["last_updated"])).total_seconds() <= 86400]
 
-        # ABSOLUTE EMPTY ROSTER SHIELD
         if len(active_members) == 0:
             log.warning(f"⚠️ Roster for {club_name} evaluated to 0 members. Skipping update to protect DB.")
             continue
