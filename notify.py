@@ -75,6 +75,18 @@ def process_post_scan_transfers():
     new_clubs_dict = Counter((p.get("club_id"), p.get("club", "Unknown Club")) for p in new_players)
     shift_clubs_dict = Counter((p.get("club_id"), p.get("club", "Unknown Club")) for p in transfers)
 
+    print("\n=== FINAL TRACKING SUMMARY ===")
+    if top250_leavers:
+        print(f"Top 250 Club Leavers Detected: {len(top250_leavers)}")
+        for leaver in sorted(top250_leavers, key=lambda x: x['rank']):
+            print(f"  - ID: {leaver['id']} | Name: {leaver['name']} | Left: {leaver['old_club']}")
+    else:
+        print("Top 250 Club Leavers Detected: 0")
+        
+    print(f"Number of players entered tracking pool: {len(new_players)}")
+    print(f"Transfers detected between tracked clubs: {len(transfers)}")
+    print("==============================\n")
+
     if not DISCORD_WEBHOOK_URL: 
         client.close()
         return
