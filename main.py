@@ -136,17 +136,31 @@ def process_club_sub_batch(api_start, api_end):
                     active_members.append(member)
 
         viewer_ids = [m.get("viewer_id") for m in active_members]
-        existing_members = {m["mid"]: m.get("club_id") for m in members_col.find({"mid": {"$in": viewer_ids}}, {"mid": 1, "club_id": 1})}
+        
+        existing_members_cursor = members_col.find({"mid": {"$in": viewer_ids}})
+        existing_members = {m["mid"]: m for m in existing_members_cursor}
         
         member_bulk_ops = []
         for member in active_members:
             viewer_id = member.get("viewer_id")
             trainer_name = member.get("trainer_name")
             
+            current_total_fans = member.get("fans", 0)
+            current_monthly_fans = member.get("fans_monthly", 0)
+            member_api_timestamp = member.get("last_updated")
+            
+            prev_data = existing_members.get(viewer_id, {})
+            prev_club_id = prev_data.get("club_id")
+            
             is_transfer = False
-            prev_club_id = existing_members.get(viewer_id)
             if prev_club_id and prev_club_id != c_id:
                 is_transfer = True
+            
+            prev_total_fans = prev_data.get("total_fans", current_total_fans)
+            daily_gain = current_total_fans - prev_total_fans
+            
+            if daily_gain < 0:
+                daily_gain = 0
             
             update_doc = {
                 "$set": {
@@ -156,7 +170,12 @@ def process_club_sub_batch(api_start, api_end):
                     "club_id": c_id,
                     "club_tier": "Ranked",
                     "last_seen": current_scan_time,
-                    "updated_at": datetime.utcnow()
+                    "updated_at": datetime.utcnow(),
+                    
+                    "total_fans": current_total_fans,
+                    "monthly_gain": current_monthly_fans,
+                    "daily_gain": daily_gain,
+                    "api_last_updated": member_api_timestamp
                 },
                 "$setOnInsert": {
                     "is_new_flag": True
