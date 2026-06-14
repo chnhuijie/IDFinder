@@ -39,6 +39,7 @@ def process_post_scan_transfers():
     if missing_players:
         unique_club_ids = list(set(p.get("club_id") for p in missing_players if p.get("club_id")))
         clubs_data = list(clubs_col.find({"circle_id": {"$in": unique_club_ids}}))
+        
         clubs_info = {c["circle_id"]: {"rank": c.get("last_known_rank", 999), "last_updated": c.get("last_updated", 0)} for c in clubs_data}
         
         bulk_updates = []
@@ -88,7 +89,7 @@ def process_post_scan_transfers():
             messages.append("🚨 **CRITICAL API OUTAGE DETECTED** 🚨")
             messages.append(f"*`uma.moe` failed to return data for {len(dropped_clubs)} Top-250 clubs. The API is likely offline or your scrapers are blocked. Individual dropoff alerts have been paused to prevent spam.*")
             messages.append("")
-            individual_leavers = [] 
+            individual_leavers = []
         else:
             individual_leavers = [leaver for leaver in top250_leavers if (leaver['old_club_id'], leaver['old_club']) not in dropped_clubs]
 
