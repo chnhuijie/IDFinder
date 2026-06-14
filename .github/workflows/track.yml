@@ -35,7 +35,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Dependencies
-        run: pip install curl_cffi pymongo requests
+        run: pip install curl_cffi pymongo requests python-dateutil
 
       - name: Run Scraper (With Auto-Retry)
         uses: nick-fields/retry@v3
@@ -64,7 +64,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Dependencies
-        run: pip install requests pymongo
+        run: pip install requests pymongo python-dateutil
 
       - name: Run notify.py
         env:
