@@ -1,132 +1,188 @@
 import os
+import sys
 import time
-import requests
-from collections import Counter
+import random
+import logging
+import dateutil.parser
+from datetime import datetime
 from pymongo import MongoClient, UpdateOne
+from curl_cffi import requests
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+log = logging.getLogger(__name__)
 
 MONGO_URI = os.getenv("MONGO_URI")
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+UMA_API_KEY = os.getenv("UMA_API_KEY") 
+BASE_API = "https://uma.moe/api/v4/circles"
 
-def send_discord_in_chunks(webhook_url, messages):
-    current_chunk = []
-    current_length = 0
+def safe_get(url, retries=3):
+    headers = {}
+    if UMA_API_KEY:
+        headers["X-API-Key"] = UMA_API_KEY
+        
+    for attempt in range(retries):
+        time.sleep(random.uniform(3.0, 6.0))
+        try:
+            response = requests.get(url, headers=headers, impersonate="chrome110", timeout=15)
+            if response.status_code == 200:
+                return response.json()
+            log.warning(f"API returned {response.status_code} on attempt {attempt+1}")
+        except Exception as e:
+            log.warning(f"Request failed: {e} on attempt {attempt+1}")
+        time.sleep(5)
+    raise RuntimeError(f"Failed to fetch {url} after {retries} attempts.")
 
-    for line in messages:
-        if current_length + len(line) + 1 > 1900:
-            requests.post(webhook_url, json={"content": "\n".join(current_chunk)}, timeout=15)
-            time.sleep(1.5)  
-            current_chunk = [line]
-            current_length = len(line)
-        else:
-            current_chunk.append(line)
-            current_length += len(line) + 1
-
-    if current_chunk:
-        requests.post(webhook_url, json={"content": "\n".join(current_chunk)}, timeout=15)
-
-def process_post_scan_transfers():
+def process_club_sub_batch(api_start, api_end):
     client = MongoClient(MONGO_URI)
-    db = client["uma_tracker"]["members"]
     clubs_col = client["uma_tracker"]["clubs"]
+    members_col = client["uma_tracker"]["members"]
     
-    db.create_index([("last_seen", 1)])
-    db.create_index([("updated_at", 1)], expireAfterSeconds=2592000)
+    limit = 100
+    api_page = api_start // limit
     
-    cutoff_time = time.time() - 14400
-    missing_players = list(db.find({"last_seen": {"$lte": cutoff_time}, "club_id": {"$ne": None}}))
-    top250_leavers = []
+    url = f"{BASE_API}/list?page={api_page}&limit={limit}&sort_by=rank&sort_dir=asc"
+    log.info(f"Fetching global list: {url}")
+    data = safe_get(url)
     
-    if missing_players:
-        unique_club_ids = list(set(p.get("club_id") for p in missing_players if p.get("club_id")))
-        clubs_data = list(clubs_col.find({"circle_id": {"$in": unique_club_ids}}))
+    if not data or "circles" not in data: 
+        raise RuntimeError("API payload missing circles context.")
+
+    slice_start = api_start % limit
+    slice_end = slice_start + (api_end - api_start)
+    target_clubs = data["circles"][slice_start:slice_end]
+    
+    if len(target_clubs) == 0:
+        log.warning(f"⚠️ API List empty for page {api_page}. Switching to Database Fallback Mode...")
         
-        # 🎯 We now pull the rank AND the last_updated time for the club
-        clubs_info = {c["circle_id"]: {"rank": c.get("last_known_rank", 999), "last_updated": c.get("last_updated", 0)} for c in clubs_data}
+        db_clubs = list(clubs_col.find({
+            "last_known_rank": {"$gte": api_start + 1, "$lte": api_end}
+        }).sort("last_known_rank", 1))
         
-        bulk_updates = []
-        
-        for player in missing_players:
-            club_id = player.get("club_id")
-            club_details = clubs_info.get(club_id, {"rank": 999, "last_updated": 0})
+        if not db_clubs:
+            client.close()
+            raise RuntimeError("Database Fallback failed: No historical clubs found in local database.")
             
-            if club_details["last_updated"] > cutoff_time:
-                continue 
-                
-            last_rank = club_details["rank"]
+        log.info(f"📋 Found {len(db_clubs)} historical clubs in local database. Scraping individual profiles...")
+        
+        target_clubs = []
+        for db_club in db_clubs:
+            c_id = db_club.get("circle_id")
+            direct_url = f"{BASE_API}?circle_id={c_id}"
             
-            if last_rank < 250:
-                top250_leavers.append({
-                    "id": player.get("mid"),
-                    "name": player.get("name", "Unknown"),
-                    "old_club": player.get("club"),
-                    "old_club_id": club_id, 
-                    "rank": last_rank + 1
-                })
-                bulk_updates.append(UpdateOne(
-                    {"_id": player["_id"]}, 
-                    {"$set": {"club": None, "club_id": None, "previous_club": None, "club_tier": "Unranked"}}
-                ))
+            try:
+                direct_data = safe_get(direct_url)
+                if direct_data and "circle" in direct_data:
+                    target_clubs.append(direct_data["circle"])
+            except Exception as e:
+                log.error(f"Failed to fetch individual club {c_id}: {e}")
+                continue
+
+    current_scan_time = time.time()
+    
+    for club_summary in target_clubs:
+        c_id = club_summary.get("circle_id")
+        club_name = club_summary.get("name")
+        club_rank = club_summary.get("monthly_rank") or club_summary.get("live_rank") or 999
         
-        if bulk_updates:
-            db.bulk_write(bulk_updates, ordered=False)
-
-    new_players = list(db.find({"last_seen": {"$gt": cutoff_time}, "is_new_flag": True}, {"club": 1, "club_id": 1}))
-    transfers = list(db.find({"last_seen": {"$gt": cutoff_time}, "is_transfer_flag": True}, {"club": 1, "club_id": 1}))
-
-    new_clubs_dict = Counter((p.get("club_id"), p.get("club", "Unknown Club")) for p in new_players)
-    shift_clubs_dict = Counter((p.get("club_id"), p.get("club", "Unknown Club")) for p in transfers)
-
-    if not DISCORD_WEBHOOK_URL: 
-        client.close()
-        return
+        direct_url = f"{BASE_API}?circle_id={c_id}"
+        log.info(f"Scanning Club: {club_name} (ID: {c_id}, Rank: {club_rank})")
         
-    messages = []
-
-    if top250_leavers:
-        leaver_counts = Counter((leaver['old_club_id'], leaver['old_club']) for leaver in top250_leavers)
-        dropped_clubs = [club_tuple for club_tuple, count in leaver_counts.items() if count >= 25]
-        individual_leavers = [leaver for leaver in top250_leavers if (leaver['old_club_id'], leaver['old_club']) not in dropped_clubs]
-
-        if dropped_clubs:
-            messages.append("**Club Dropoff Detected**")
-            messages.append("*The following clubs dropped completely off the Top 250 leaderboard:*")
-            for club_id, club_name in dropped_clubs:
-                club_rank = next((l['rank'] for l in top250_leavers if l['old_club_id'] == club_id), "??")
-                leaver_count = leaver_counts[(club_id, club_name)]
-                messages.append(f"  • **{club_name}** (Rank {club_rank}) | Lost tracking for {leaver_count} players.")
-            messages.append("")
-
-        if individual_leavers:
-            messages.append("**Top 250 Club Leavers Detected**")
-            messages.append("*Left their club and dropped completely off the leaderboard:*")
-            for leaver in sorted(individual_leavers, key=lambda x: x['rank']):
-                messages.append(f"  • `ID: {leaver['id']}` | **{leaver['name']}** left **{leaver['old_club']}** (Rank {leaver['rank']})")
-            messages.append("")
-
-    if new_players:
-        messages.append(f"**{len(new_players)}** new players entered the tracking pool.")
-        for (club_id, club_name), count in new_clubs_dict.most_common(15):
-            messages.append(f"  • **{club_name}**: +{count} new player(s)")
-        messages.append("")
-
-    if transfers:
-        messages.append(f"**{len(transfers)}** players moved between tracked clubs.")
-        for (club_id, club_name), count in shift_clubs_dict.most_common(15):
-            messages.append(f"  • **{club_name}**: +{count} transferred player(s)")
-
-    if messages:
-        send_discord_in_chunks(DISCORD_WEBHOOK_URL, messages)
-        db.update_many(
-            {"last_seen": {"$gt": cutoff_time}}, 
+        try:
+            circle_data = safe_get(direct_url)
+        except Exception as e:
+            log.error(f"Failed to fetch details for {club_name}: {e}")
+            continue
+            
+        if not circle_data or "members" not in circle_data:
+            continue
+            
+        club_info = circle_data.get("circle", {})
+        clubs_col.update_one(
+            {"circle_id": c_id},
             {"$set": {
-                "is_new_flag": False, 
-                "is_transfer_flag": False,
-                "historical_club_snapshot": None,
-                "historical_club_id_snapshot": None
-            }}
+                "name": club_name,
+                "last_known_rank": club_rank,
+                "last_updated": current_scan_time,
+                "raw_data": club_info
+            }},
+            upsert=True
         )
 
+        official_member_count = club_info.get("member_count")
+        
+        if official_member_count is not None:
+            sorted_members = sorted(
+                circle_data["members"], 
+                key=lambda x: x.get("last_updated") or "", 
+                reverse=True
+            )
+            active_members = sorted_members[:official_member_count]
+        else:
+            club_last_updated_str = club_info.get("last_updated")
+            if not club_last_updated_str:
+                active_members = circle_data["members"]
+            else:
+                club_updated_dt = dateutil.parser.isoparse(club_last_updated_str)
+                active_members = []
+                
+                for member in circle_data["members"]:
+                    member_updated_str = member.get("last_updated")
+                    if not member_updated_str:
+                        continue
+                        
+                    member_updated_dt = dateutil.parser.isoparse(member_updated_str)
+                    if (club_updated_dt - member_updated_dt).total_seconds() > 86400:
+                        continue 
+                        
+                    active_members.append(member)
+
+        viewer_ids = [m.get("viewer_id") for m in active_members]
+        existing_members = {m["mid"]: m.get("club_id") for m in members_col.find({"mid": {"$in": viewer_ids}}, {"mid": 1, "club_id": 1})}
+        
+        member_bulk_ops = []
+        for member in active_members:
+            viewer_id = member.get("viewer_id")
+            trainer_name = member.get("trainer_name")
+            
+            is_transfer = False
+            prev_club_id = existing_members.get(viewer_id)
+            if prev_club_id and prev_club_id != c_id:
+                is_transfer = True
+            
+            update_doc = {
+                "$set": {
+                    "mid": viewer_id,
+                    "name": trainer_name,
+                    "club": club_name,
+                    "club_id": c_id,
+                    "club_tier": "Ranked",
+                    "last_seen": current_scan_time,
+                    "updated_at": datetime.utcnow()
+                },
+                "$setOnInsert": {
+                    "is_new_flag": True
+                }
+            }
+            
+            if is_transfer:
+                update_doc["$set"]["is_transfer_flag"] = True
+                update_doc["$set"]["previous_club_id"] = prev_club_id
+            
+            member_bulk_ops.append(
+                UpdateOne({"mid": viewer_id}, update_doc, upsert=True)
+            )
+            
+        if member_bulk_ops:
+            members_col.bulk_write(member_bulk_ops, ordered=False)
+            
     client.close()
+    log.info(f"Successfully processed batch {api_start} to {api_end}")
 
 if __name__ == "__main__":
-    process_post_scan_transfers()
+    if len(sys.argv) < 3:
+        log.error("Usage: python main.py <start_index> <end_index>")
+        sys.exit(1)
+        
+    start_idx = int(sys.argv[1])
+    end_idx = int(sys.argv[2])
+    process_club_sub_batch(start_idx, end_idx)
