@@ -17,6 +17,10 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 BASE_API = "https://uma.moe/api/v4/circles"
 
 def safe_get(url, retries=3):
+    for attempt in range(retries):
+        try:
+            print(f"DEBUG: Attempting to fetch {url} (Attempt {attempt+1})") # ADD THIS
+            response = requests.get(url, headers=headers, impersonate="chrome120", timeout=20)
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Referer": "https://uma.moe/",
