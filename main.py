@@ -17,20 +17,24 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 BASE_API = "https://uma.moe/api/v4/circles"
 
 def safe_get(url, retries=3):
-    headers = {}
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://uma.moe/",
+        "Origin": "https://uma.moe"
+    }
     if UMA_API_KEY:
         headers["X-API-Key"] = UMA_API_KEY
         
     for attempt in range(retries):
         time.sleep(random.uniform(3.0, 6.0))
         try:
-            response = requests.get(url, headers=headers, impersonate="chrome110", timeout=15)
+            response = requests.get(url, headers=headers, impersonate="chrome120", timeout=20)
             if response.status_code == 200:
                 return response.json()
             log.warning(f"API returned {response.status_code} on attempt {attempt+1}")
         except Exception as e:
             log.warning(f"Request failed: {e} on attempt {attempt+1}")
-        time.sleep(5)
+        time.sleep(10)
     raise RuntimeError(f"Failed to fetch {url} after {retries} attempts.")
 
 def process_club_sub_batch(api_start, api_end):
@@ -54,26 +58,20 @@ def process_club_sub_batch(api_start, api_end):
     
     if len(target_clubs) == 0:
         log.warning(f"⚠️ API List empty for page {api_page}. Switching to Database Fallback Mode...")
-        
-        db_clubs = list(clubs_col.find({
-            "last_known_rank": {"$gte": api_start + 1, "$lte": api_end}
-        }).sort("last_known_rank", 1))
-        
+        db_clubs = list(clubs_col.find({"last_known_rank": {"$gte": api_start + 1, "$lte": api_end}}).sort("last_known_rank", 1))
         if not db_clubs:
             client.close()
-            raise RuntimeError("Database Fallback failed: No historical clubs found in local database.")
+            raise RuntimeError("Database Fallback failed.")
             
         target_clubs = []
         for db_club in db_clubs:
             c_id = db_club.get("circle_id")
-            direct_url = f"{BASE_API}?circle_id={c_id}"
-            
             try:
-                direct_data = safe_get(direct_url)
+                direct_data = safe_get(f"{BASE_API}?circle_id={c_id}")
                 if direct_data and "circle" in direct_data:
                     target_clubs.append(direct_data["circle"])
             except Exception as e:
-                log.error(f"Failed to fetch individual club {c_id}: {e}")
+                log.error(f"Failed to fetch {c_id}: {e}")
                 continue
 
     current_scan_time = time.time()
@@ -84,10 +82,8 @@ def process_club_sub_batch(api_start, api_end):
         club_name = club_summary.get("name")
         club_rank = club_summary.get("monthly_rank") or club_summary.get("live_rank") or 999
         
-        direct_url = f"{BASE_API}?circle_id={c_id}"
-        
         try:
-            circle_data = safe_get(direct_url)
+            circle_data = safe_get(f"{BASE_API}?circle_id={c_id}")
         except Exception as e:
             log.error(f"Failed to fetch details for {club_name}: {e}")
             continue
@@ -96,134 +92,59 @@ def process_club_sub_batch(api_start, api_end):
             continue
             
         club_info = circle_data.get("circle", {})
-        clubs_col.update_one(
-            {"circle_id": c_id},
-            {"$set": {
-                "name": club_name,
-                "last_known_rank": club_rank,
-                "last_updated": current_scan_time,
-                "raw_data": club_info
-            }},
-            upsert=True
-        )
-
-        official_member_count = club_info.get("member_count")
         
+        official_member_count = club_info.get("member_count")
         if official_member_count is not None:
-            sorted_members = sorted(
-                circle_data["members"], 
-                key=lambda x: x.get("last_updated") or "", 
-                reverse=True
-            )
+            sorted_members = sorted(circle_data["members"], key=lambda x: x.get("last_updated") or "", reverse=True)
             active_members = sorted_members[:official_member_count]
         else:
-            club_last_updated_str = club_info.get("last_updated")
-            if not club_last_updated_str:
-                active_members = circle_data["members"]
-            else:
-                club_updated_dt = dateutil.parser.isoparse(club_last_updated_str)
-                active_members = []
-                
-                for member in circle_data["members"]:
-                    member_updated_str = member.get("last_updated")
-                    if not member_updated_str:
-                        continue
-                        
-                    member_updated_dt = dateutil.parser.isoparse(member_updated_str)
-                    if (club_updated_dt - member_updated_dt).total_seconds() > 86400:
-                        continue 
-                        
-                    active_members.append(member)
+            club_updated_dt = dateutil.parser.isoparse(club_info.get("last_updated", "2000-01-01T00:00:00Z"))
+            active_members = [m for m in circle_data["members"] if m.get("last_updated") and (club_updated_dt - dateutil.parser.isoparse(m["last_updated"])).total_seconds() <= 86400]
+
+        if len(active_members) == 0:
+            log.warning(f"⚠️ Roster for {club_name} evaluated to 0 members (Likely API glitch). Skipping update to protect DB.")
+            continue
+            
+        clubs_col.update_one({"circle_id": c_id}, {"$set": {"name": club_name, "last_known_rank": club_rank, "last_updated": current_scan_time, "raw_data": club_info}}, upsert=True)
 
         viewer_ids = [m.get("viewer_id") for m in active_members]
-        
-        existing_members_cursor = members_col.find({"mid": {"$in": viewer_ids}})
-        existing_members = {m["mid"]: m for m in existing_members_cursor}
+        existing_members = {m["mid"]: m for m in members_col.find({"mid": {"$in": viewer_ids}})}
         
         member_bulk_ops = []
         for member in active_members:
             viewer_id = member.get("viewer_id")
-            trainer_name = member.get("trainer_name")
-            
             current_total_fans = member.get("fans", 0)
-            current_monthly_fans = member.get("fans_monthly", 0)
-            member_api_timestamp = member.get("last_updated")
-            
             prev_data = existing_members.get(viewer_id, {})
-            prev_club_id = prev_data.get("club_id")
             
-            is_transfer = False
-            if prev_club_id and prev_club_id != c_id:
-                is_transfer = True
-            
-            prev_total_fans = prev_data.get("total_fans", current_total_fans)
-            daily_gain = current_total_fans - prev_total_fans
-            
-            if daily_gain < 0:
-                daily_gain = 0
+            daily_gain = max(0, current_total_fans - prev_data.get("total_fans", current_total_fans))
             
             update_doc = {
                 "$set": {
-                    "mid": viewer_id,
-                    "name": trainer_name,
-                    "club": club_name,
-                    "club_id": c_id,
-                    "club_tier": "Ranked",
-                    "last_seen": current_scan_time,
-                    "updated_at": datetime.utcnow(),
-                    
-                    "total_fans": current_total_fans,
-                    "monthly_gain": current_monthly_fans,
-                    "daily_gain": daily_gain,
-                    "api_last_updated": member_api_timestamp
+                    "mid": viewer_id, "name": member.get("trainer_name"), "club": club_name, "club_id": c_id, "club_tier": "Ranked",
+                    "last_seen": current_scan_time, "updated_at": datetime.utcnow(),
+                    "total_fans": current_total_fans, "monthly_gain": member.get("fans_monthly", 0),
+                    "daily_gain": daily_gain, "api_last_updated": member.get("last_updated")
                 },
-                "$setOnInsert": {
-                    "is_new_flag": True
-                }
+                "$setOnInsert": {"is_new_flag": True}
             }
+            if prev_data.get("club_id") and prev_data.get("club_id") != c_id:
+                update_doc["$set"].update({"is_transfer_flag": True, "previous_club_id": prev_data.get("club_id")})
             
-            if is_transfer:
-                update_doc["$set"]["is_transfer_flag"] = True
-                update_doc["$set"]["previous_club_id"] = prev_club_id
-            
-            member_bulk_ops.append(
-                UpdateOne({"mid": viewer_id}, update_doc, upsert=True)
-            )
+            member_bulk_ops.append(UpdateOne({"mid": viewer_id}, update_doc, upsert=True))
             
         if member_bulk_ops:
             members_col.bulk_write(member_bulk_ops, ordered=False)
 
-        active_count = official_member_count if official_member_count is not None else len(active_members)
-        formatted_line = f"**Synced:** `{club_name}` (Rank {club_rank}) | Active: {active_count}/30"
+        formatted_line = f"**Synced:** `{club_name}` (Rank {club_rank}) | Active: {len(active_members)}/30"
         stream_buffer.append((club_rank, formatted_line))
 
         if len(stream_buffer) == 20:
             if DISCORD_WEBHOOK_URL:
-                try:
-                    ranks = [item[0] for item in stream_buffer]
-                    lines = [item[1] for item in stream_buffer]
-                    payload = f"**Data Stream: Ranks {min(ranks)} to {max(ranks)}**\n" + "\n".join(lines)
-                    requests.post(DISCORD_WEBHOOK_URL, json={"content": payload}, timeout=10)
-                except Exception as e:
-                    log.error(f"Failed to send Discord stream: {e}")
+                requests.post(DISCORD_WEBHOOK_URL, json={"content": f"**Data Stream: Ranks {min(r for r,l in stream_buffer)} to {max(r for r,l in stream_buffer)}**\n" + "\n".join(l for r,l in stream_buffer)}, timeout=10)
             stream_buffer = []
             
-    if stream_buffer and DISCORD_WEBHOOK_URL:
-        try:
-            ranks = [item[0] for item in stream_buffer]
-            lines = [item[1] for item in stream_buffer]
-            payload = f"**Data Stream: Ranks {min(ranks)} to {max(ranks)}**\n" + "\n".join(lines)
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": payload}, timeout=10)
-        except Exception as e:
-            log.error(f"Failed to send final Discord stream: {e}")
-
     client.close()
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        log.error("Usage: python main.py <start_index> <end_index>")
-        sys.exit(1)
-        
-    start_idx = int(sys.argv[1])
-    end_idx = int(sys.argv[2])
-    process_club_sub_batch(start_idx, end_idx)
+    if len(sys.argv) < 3: sys.exit(1)
+    process_club_sub_batch(int(sys.argv[1]), int(sys.argv[2]))
