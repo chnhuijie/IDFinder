@@ -39,12 +39,18 @@ def process_post_scan_transfers():
     if missing_players:
         unique_club_ids = list(set(p.get("club_id") for p in missing_players if p.get("club_id")))
         clubs_data = list(clubs_col.find({"circle_id": {"$in": unique_club_ids}}))
-        clubs_map = {c["circle_id"]: c.get("last_known_rank", 999) for c in clubs_data}
+        clubs_info = {c["circle_id"]: {"rank": c.get("last_known_rank", 999), "last_updated": c.get("last_updated", 0)} for c in clubs_data}
+        
         bulk_updates = []
         
         for player in missing_players:
             club_id = player.get("club_id")
-            last_rank = clubs_map.get(club_id, 999)
+            club_details = clubs_info.get(club_id, {"rank": 999, "last_updated": 0})
+            
+            if club_details["last_updated"] > cutoff_time:
+                continue 
+                
+            last_rank = club_details["rank"]
             
             if last_rank < 250:
                 top250_leavers.append({
@@ -77,23 +83,30 @@ def process_post_scan_transfers():
     if top250_leavers:
         leaver_counts = Counter((leaver['old_club_id'], leaver['old_club']) for leaver in top250_leavers)
         dropped_clubs = [club_tuple for club_tuple, count in leaver_counts.items() if count >= 25]
-        individual_leavers = [leaver for leaver in top250_leavers if (leaver['old_club_id'], leaver['old_club']) not in dropped_clubs]
-
-        if dropped_clubs:
-            messages.append("**Club Dropoff Detected**")
-            messages.append("*The following clubs dropped completely off the Top 250 leaderboard:*")
-            for club_id, club_name in dropped_clubs:
-                club_rank = next((l['rank'] for l in top250_leavers if l['old_club_id'] == club_id), "??")
-                leaver_count = leaver_counts[(club_id, club_name)]
-                messages.append(f"  • **{club_name}** (Rank {club_rank}) | Lost tracking for {leaver_count} players.")
+        
+        if len(dropped_clubs) > 10:
+            messages.append("🚨 **CRITICAL API OUTAGE DETECTED** 🚨")
+            messages.append(f"*`uma.moe` failed to return data for {len(dropped_clubs)} Top-250 clubs. The API is likely offline or your scrapers are blocked. Individual dropoff alerts have been paused to prevent spam.*")
             messages.append("")
+            individual_leavers = [] 
+        else:
+            individual_leavers = [leaver for leaver in top250_leavers if (leaver['old_club_id'], leaver['old_club']) not in dropped_clubs]
 
-        if individual_leavers:
-            messages.append("**Top 250 Club Leavers Detected**")
-            messages.append("*Left their club and dropped completely off the leaderboard:*")
-            for leaver in sorted(individual_leavers, key=lambda x: x['rank']):
-                messages.append(f"  • `ID: {leaver['id']}` | **{leaver['name']}** left **{leaver['old_club']}** (Rank {leaver['rank']})")
-            messages.append("")
+            if dropped_clubs:
+                messages.append("**Club Dropoff Detected**")
+                messages.append("*The following clubs dropped completely off the Top 250 leaderboard:*")
+                for club_id, club_name in dropped_clubs:
+                    club_rank = next((l['rank'] for l in top250_leavers if l['old_club_id'] == club_id), "??")
+                    leaver_count = leaver_counts[(club_id, club_name)]
+                    messages.append(f"  • **{club_name}** (Rank {club_rank}) | Lost tracking for {leaver_count} players.")
+                messages.append("")
+
+            if individual_leavers:
+                messages.append("**Top 250 Club Leavers Detected**")
+                messages.append("*Left their club and dropped completely off the leaderboard:*")
+                for leaver in sorted(individual_leavers, key=lambda x: x['rank']):
+                    messages.append(f"  • `ID: {leaver['id']}` | **{leaver['name']}** left **{leaver['old_club']}** (Rank {leaver['rank']})")
+                messages.append("")
 
     if new_players:
         messages.append(f"**{len(new_players)}** new players entered the tracking pool.")
