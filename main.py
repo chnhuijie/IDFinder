@@ -17,10 +17,6 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 BASE_API = "https://uma.moe/api/v4/circles"
 
 def safe_get(url, retries=3):
-    for attempt in range(retries):
-        try:
-            print(f"DEBUG: Attempting to fetch {url} (Attempt {attempt+1})") # ADD THIS
-            response = requests.get(url, headers=headers, impersonate="chrome120", timeout=20)
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Referer": "https://uma.moe/",
@@ -61,7 +57,7 @@ def process_club_sub_batch(api_start, api_end):
     target_clubs = data["circles"][slice_start:slice_end]
     
     if len(target_clubs) == 0:
-        log.warning(f"⚠️ API List empty for page {api_page}. Switching to Database Fallback Mode...")
+        log.warning(f"⚠️ API List empty. Switching to Database Fallback Mode...")
         db_clubs = list(clubs_col.find({"last_known_rank": {"$gte": api_start + 1, "$lte": api_end}}).sort("last_known_rank", 1))
         if not db_clubs:
             client.close()
@@ -97,6 +93,7 @@ def process_club_sub_batch(api_start, api_end):
             
         club_info = circle_data.get("circle", {})
         
+        # GHOST MEMBER FILTER
         official_member_count = club_info.get("member_count")
         if official_member_count is not None:
             sorted_members = sorted(circle_data["members"], key=lambda x: x.get("last_updated") or "", reverse=True)
@@ -105,8 +102,9 @@ def process_club_sub_batch(api_start, api_end):
             club_updated_dt = dateutil.parser.isoparse(club_info.get("last_updated", "2000-01-01T00:00:00Z"))
             active_members = [m for m in circle_data["members"] if m.get("last_updated") and (club_updated_dt - dateutil.parser.isoparse(m["last_updated"])).total_seconds() <= 86400]
 
+        # ABSOLUTE EMPTY ROSTER SHIELD
         if len(active_members) == 0:
-            log.warning(f"⚠️ Roster for {club_name} evaluated to 0 members (Likely API glitch). Skipping update to protect DB.")
+            log.warning(f"⚠️ Roster for {club_name} evaluated to 0 members. Skipping update to protect DB.")
             continue
             
         clubs_col.update_one({"circle_id": c_id}, {"$set": {"name": club_name, "last_known_rank": club_rank, "last_updated": current_scan_time, "raw_data": club_info}}, upsert=True)
