@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 
 MONGO_URI = os.getenv("MONGO_URI")
 UMA_API_KEY = os.getenv("UMA_API_KEY") 
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 BASE_API = "https://uma.moe/api/v4/circles"
 
 def safe_get(url, retries=3):
@@ -62,8 +63,6 @@ def process_club_sub_batch(api_start, api_end):
             client.close()
             raise RuntimeError("Database Fallback failed: No historical clubs found in local database.")
             
-        log.info(f"📋 Found {len(db_clubs)} historical clubs in local database. Scraping individual profiles...")
-        
         target_clubs = []
         for db_club in db_clubs:
             c_id = db_club.get("circle_id")
@@ -78,6 +77,7 @@ def process_club_sub_batch(api_start, api_end):
                 continue
 
     current_scan_time = time.time()
+    stream_buffer = []
     
     for club_summary in target_clubs:
         c_id = club_summary.get("circle_id")
@@ -85,7 +85,6 @@ def process_club_sub_batch(api_start, api_end):
         club_rank = club_summary.get("monthly_rank") or club_summary.get("live_rank") or 999
         
         direct_url = f"{BASE_API}?circle_id={c_id}"
-        log.info(f"Scanning Club: {club_name} (ID: {c_id}, Rank: {club_rank})")
         
         try:
             circle_data = safe_get(direct_url)
@@ -174,9 +173,32 @@ def process_club_sub_batch(api_start, api_end):
             
         if member_bulk_ops:
             members_col.bulk_write(member_bulk_ops, ordered=False)
+
+        active_count = official_member_count if official_member_count is not None else len(active_members)
+        formatted_line = f"**Synced:** `{club_name}` (Rank {club_rank}) | Active: {active_count}/30"
+        stream_buffer.append((club_rank, formatted_line))
+
+        if len(stream_buffer) == 20:
+            if DISCORD_WEBHOOK_URL:
+                try:
+                    ranks = [item[0] for item in stream_buffer]
+                    lines = [item[1] for item in stream_buffer]
+                    payload = f"**Data Stream: Ranks {min(ranks)} to {max(ranks)}**\n" + "\n".join(lines)
+                    requests.post(DISCORD_WEBHOOK_URL, json={"content": payload}, timeout=10)
+                except Exception as e:
+                    log.error(f"Failed to send Discord stream: {e}")
+            stream_buffer = []
             
+    if stream_buffer and DISCORD_WEBHOOK_URL:
+        try:
+            ranks = [item[0] for item in stream_buffer]
+            lines = [item[1] for item in stream_buffer]
+            payload = f"**Data Stream: Ranks {min(ranks)} to {max(ranks)}**\n" + "\n".join(lines)
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": payload}, timeout=10)
+        except Exception as e:
+            log.error(f"Failed to send final Discord stream: {e}")
+
     client.close()
-    log.info(f"Successfully processed batch {api_start} to {api_end}")
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
