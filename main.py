@@ -26,7 +26,7 @@ def safe_get(url, retries=3):
         headers["X-API-Key"] = UMA_API_KEY
         
     for attempt in range(retries):
-        time.sleep(random.uniform(3.0, 6.0))
+        time.sleep(random.uniform(4.0, 8.0)) 
         try:
             response = requests.get(url, headers=headers, impersonate="chrome120", timeout=20)
             if response.status_code == 200:
@@ -56,7 +56,6 @@ def process_club_sub_batch(api_start, api_end):
     slice_end = slice_start + (api_end - api_start)
     target_clubs = data["circles"][slice_start:slice_end]
     
-    # TRIPWIRE FALLBACK
     if len(target_clubs) == 0:
         log.warning(f" API List empty. Switching to Database Fallback Mode...")
         db_clubs = list(clubs_col.find({"last_known_rank": {"$gte": api_start + 1, "$lte": api_end}}).sort("last_known_rank", 1))
@@ -85,18 +84,36 @@ def process_club_sub_batch(api_start, api_end):
         
         log.info(f"Scanning Club: {club_name} (ID: {c_id}, Rank: {club_rank})")
         
-        try:
-            circle_data = safe_get(f"{BASE_API}?circle_id={c_id}")
-        except Exception as e:
-            log.error(f"Failed to fetch details for {club_name}: {e}")
-            continue
-            
+        circle_data = None
+        max_payload_retries = 3
+        
+        for attempt in range(max_payload_retries):
+            try:
+                temp_data = safe_get(f"{BASE_API}?circle_id={c_id}")
+                
+                club_info_temp = temp_data.get("circle", {})
+                official_count = club_info_temp.get("member_count")
+                actual_count = len(temp_data.get("members", []))
+                
+                if official_count is not None and actual_count < official_count:
+                    log.warning(f"⚠️ API Glitch for {club_name}: Got {actual_count}/{official_count} members. Retrying (Attempt {attempt+1}/{max_payload_retries})...")
+                    time.sleep(5)
+                    continue
+                
+                circle_data = temp_data
+                break 
+                
+            except Exception as e:
+                log.error(f"Failed to fetch details for {club_name} on attempt {attempt+1}: {e}")
+                time.sleep(5)
+                
         if not circle_data or "members" not in circle_data:
+            log.error(f"❌ Completely failed to get valid roster for {club_name} after {max_payload_retries} attempts. Skipping.")
             continue
             
         club_info = circle_data.get("circle", {})
-        
         official_member_count = club_info.get("member_count")
+        
         if official_member_count is not None:
             sorted_members = sorted(circle_data["members"], key=lambda x: x.get("last_updated") or "", reverse=True)
             active_members = sorted_members[:official_member_count]
