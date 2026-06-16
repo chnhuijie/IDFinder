@@ -64,7 +64,7 @@ def process_post_scan_transfers():
                     "old_club_id": club_id, 
                     "rank": club_details["rank"]
                 })
-                bulk_updates.append(UpdateOne({"_id": player["_id"]}, {"$set": {"club": None, "club_id": None, "previous_club": None, "club_tier": "Unranked"}}))
+                bulk_updates.append(UpdateOne({"_id": player["_id"]}, {"$set": {"club": None, "club_id": None, "club_tier": "Unranked"}}))
         
         if bulk_updates:
             db.bulk_write(bulk_updates, ordered=False)
