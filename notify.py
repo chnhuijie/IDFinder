@@ -45,7 +45,7 @@ def process_post_scan_transfers():
         clubs_data = list(clubs_col.find({"circle_id": {"$in": list(all_club_ids)}}))
         clubs_info = {c["circle_id"]: {"rank": c.get("last_known_rank", 999), "last_updated": c.get("last_updated", 0)} for c in clubs_data}
 
-    top250_leavers_raw = []
+    top500_leavers_raw = []
     
     if missing_players:
         for player in missing_players:
@@ -55,8 +55,8 @@ def process_post_scan_transfers():
             if club_details["last_updated"] <= cutoff_time:
                 continue 
                 
-            if club_details["rank"] < 250:
-                top250_leavers_raw.append({
+            if club_details["rank"] <= 500:
+                top500_leavers_raw.append({
                     "_id": player["_id"],
                     "id": player.get("mid"), 
                     "name": player.get("name", "Unknown"), 
@@ -65,7 +65,7 @@ def process_post_scan_transfers():
                     "rank": club_details["rank"]
                 })
 
-    leaver_counts = Counter((l['old_club_id'], l['old_club']) for l in top250_leavers_raw)
+    leaver_counts = Counter((l['old_club_id'], l['old_club']) for l in top500_leavers_raw)
     
     dropped_clubs = [c for c, count in leaver_counts.items() if count >= 25]
     is_api_outage = len(dropped_clubs) > 10
@@ -77,12 +77,12 @@ def process_post_scan_transfers():
     if is_api_outage:
         print("CRITICAL: Global API Outage detected. Halting leaver processing.")
     else:
-        for l in top250_leavers_raw:
+        for l in top500_leavers_raw:
             if (l['old_club_id'], l['old_club']) in dropped_clubs:
                 bot_purge_ids.append(l['_id'])
             else:
                 individual_leavers.append(l)
-                bulk_updates.append(UpdateOne({"_id": l["_id"]}, {"$set": {"club": None, "club_id": None, "club_tier": "Unranked"}}))
+                bulk_updates.append(UpdateOne({"_id": l["_id"]}, {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": l["old_club"], "previous_club_id": l["old_club_id"]}}))
 
     if bulk_updates:
         db.bulk_write(bulk_updates, ordered=False)
@@ -90,7 +90,7 @@ def process_post_scan_transfers():
         db.delete_many({"_id": {"$in": bot_purge_ids}})
 
     print("\n=== FINAL TRACKING SUMMARY ===")
-    print(f"Normal Top 250 Leavers Processed: {len(individual_leavers)}")
+    print(f"Normal Top 500 Leavers Processed: {len(individual_leavers)}")
     print(f"Bot/Ghost Accounts Purged: {len(bot_purge_ids)}")
     print(f"Number of players entered tracking pool: {len(new_players)}")
     print(f"Transfers detected between tracked clubs: {len(transfers)}")
@@ -102,8 +102,8 @@ def process_post_scan_transfers():
         
     messages = []
     
-    if top250_leavers_raw or new_players or transfers:
-        if top250_leavers_raw:
+    if top500_leavers_raw or new_players or transfers:
+        if top500_leavers_raw:
             if is_api_outage:
                 messages.append("**API OUTAGE DETECTED:** Mass data loss suspected. Leaver tracking suspended to protect database.")
             else:
@@ -115,7 +115,7 @@ def process_post_scan_transfers():
                         messages.append(f"  • **{club_name}** ({rank_str}) | Lost tracking for {leaver_counts[(club_id, club_name)]} players.")
                         
                 if individual_leavers:
-                    messages.append("**Top 250 Club Leavers Detected**")
+                    messages.append("**Top 500 Club Leavers Detected**")
                     for l in sorted(individual_leavers, key=lambda x: x['rank']):
                         rank_str = f"Rank {l['rank']}" if l['rank'] != 999 else "Unranked"
                         messages.append(f"  • `ID: {l['id']}` | **{l['name']}** left **{l['old_club']}** ({rank_str})")
