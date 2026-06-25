@@ -134,12 +134,25 @@ def process_club_sub_batch(api_start, api_end):
             
         clubs_col.update_one({"circle_id": c_id}, {"$set": {"name": club_name, "last_known_rank": club_rank, "last_updated": current_scan_time, "raw_data": club_info}}, upsert=True)
 
-        viewer_ids = [m.get("viewer_id") for m in active_members]
+        viewer_ids = []
+        for m in active_members:
+            try:
+                viewer_ids.append(int(m.get("viewer_id")))
+            except (TypeError, ValueError):
+                viewer_ids.append(m.get("viewer_id"))
+
         existing_members = {m["mid"]: m for m in members_col.find({"mid": {"$in": viewer_ids}})}
         
         member_bulk_ops = []
         for member in active_members:
-            viewer_id = member.get("viewer_id")
+            raw_vid = member.get("viewer_id")
+            try:
+                viewer_id = int(raw_vid)
+            except (TypeError, ValueError):
+                viewer_id = raw_vid
+                
+            trainer_name = member.get("trainer_name") or member.get("name") or "Unknown"
+
             current_total_fans = member.get("fans", 0)
             prev_data = existing_members.get(viewer_id, {})
             
@@ -147,7 +160,7 @@ def process_club_sub_batch(api_start, api_end):
             
             update_doc = {
                 "$set": {
-                    "mid": viewer_id, "name": member.get("trainer_name"), "club": club_name, "club_id": c_id, "club_tier": "Ranked",
+                    "mid": viewer_id, "name": trainer_name, "club": club_name, "club_id": c_id, "club_tier": "Ranked",
                     "last_seen": current_scan_time, "updated_at": datetime.utcnow(),
                     "total_fans": current_total_fans, "monthly_gain": member.get("fans_monthly", 0),
                     "daily_gain": daily_gain, "api_last_updated": member.get("last_updated")
