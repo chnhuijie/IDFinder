@@ -96,9 +96,12 @@ def process_club_sub_batch(api_start, api_end):
                 actual_count = len(temp_data.get("members", []))
                 
                 if official_count is not None and actual_count < official_count:
-                    log.warning(f"⚠️ API Glitch for {club_name}: Got {actual_count}/{official_count} members. Retrying (Attempt {attempt+1}/{max_payload_retries})...")
-                    time.sleep(5)
-                    continue
+                    if attempt < max_payload_retries - 1:
+                        log.warning(f"⚠️ API Glitch for {club_name}: Got {actual_count}/{official_count} members. Retrying (Attempt {attempt+1}/{max_payload_retries})...")
+                        time.sleep(5)
+                        continue
+                    else:
+                        log.warning(f"⚠️ Exhausted retries for {club_name}. Cache mismatch persists. Accepting {actual_count} members to avoid dropping club.")
                 
                 circle_data = temp_data
                 break 
@@ -115,8 +118,12 @@ def process_club_sub_batch(api_start, api_end):
         official_member_count = club_info.get("member_count")
         
         if official_member_count is not None:
+            safe_count = official_member_count
+            if safe_count < 15 and len(circle_data["members"]) >= 25:
+                log.warning(f"API Glitch: member_count is {safe_count} but found {len(circle_data['members'])} players. Overriding.")
+                safe_count = 30
             sorted_members = sorted(circle_data["members"], key=lambda x: x.get("last_updated") or "", reverse=True)
-            active_members = sorted_members[:official_member_count]
+            active_members = sorted_members[:safe_count]
         else:
             club_updated_dt = dateutil.parser.isoparse(club_info.get("last_updated", "2000-01-01T00:00:00Z"))
             active_members = [m for m in circle_data["members"] if m.get("last_updated") and (club_updated_dt - dateutil.parser.isoparse(m["last_updated"])).total_seconds() <= 86400]
