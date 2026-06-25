@@ -68,7 +68,7 @@ def process_post_scan_transfers():
     leaver_counts = Counter((l['old_club_id'], l['old_club']) for l in top500_leavers_raw)
     
     dropped_clubs = [c for c, count in leaver_counts.items() if count >= 25]
-    is_api_outage = False
+    is_api_outage = len(dropped_clubs) > 60
     
     bulk_updates = []
     bot_purge_ids = []
