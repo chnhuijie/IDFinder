@@ -24,6 +24,8 @@ jobs:
             end: 400
           - start: 400
             end: 500
+          - start: 500
+            end: 600
 
     steps:
       - name: Checkout Code
