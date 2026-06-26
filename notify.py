@@ -3,6 +3,8 @@ import time
 import requests
 from collections import Counter
 from pymongo import MongoClient, UpdateOne
+from utils import check_player_integrity 
+UMA_API_KEY = os.getenv("UMA_API_KEY")
 
 MONGO_URI = os.getenv("MONGO_URI")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
@@ -45,9 +47,11 @@ def process_post_scan_transfers():
         clubs_data = list(clubs_col.find({"circle_id": {"$in": list(all_club_ids)}}))
         clubs_info = {c["circle_id"]: {"rank": c.get("last_known_rank", 999), "last_updated": c.get("last_updated", 0)} for c in clubs_data}
 
-    top500_leavers_raw = []
+top500_leavers_raw = []
     
     if missing_players:
+        blacklist_col = client["uma_tracker"]["blacklist"]
+        
         for player in missing_players:
             club_id = player.get("club_id")
             club_details = clubs_info.get(club_id, {"rank": 999, "last_updated": 0})
@@ -56,9 +60,28 @@ def process_post_scan_transfers():
                 continue 
                 
             if club_details["rank"] <= 500:
+                player_mid = player.get("mid")
+                
+                is_bot, bl_reason = check_player_integrity(player_mid, UMA_API_KEY)
+                
+                if is_bot:
+                    blacklist_col.update_one(
+                        {"mid": int(player_mid)}, 
+                        {"$set": {"reason": bl_reason, "updated_at": time.time()}}, 
+                        upsert=True
+                    )
+                    
+                    bulk_updates.append(UpdateOne(
+                        {"_id": player["_id"]}, 
+                        {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
+                    ))
+                    
+                    print(f"BOT CAUGHT: {player.get('name')} ({player_mid}) - {bl_reason}")
+                    continue 
+
                 top500_leavers_raw.append({
                     "_id": player["_id"],
-                    "id": player.get("mid"), 
+                    "id": player_mid, 
                     "name": player.get("name", "Unknown"), 
                     "old_club": player.get("club"), 
                     "old_club_id": club_id, 
