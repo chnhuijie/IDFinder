@@ -4,8 +4,8 @@ import requests
 from collections import Counter
 from pymongo import MongoClient, UpdateOne
 from utils import check_player_integrity 
-UMA_API_KEY = os.getenv("UMA_API_KEY")
 
+UMA_API_KEY = os.getenv("UMA_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
@@ -47,9 +47,10 @@ def process_post_scan_transfers():
         clubs_data = list(clubs_col.find({"circle_id": {"$in": list(all_club_ids)}}))
         clubs_info = {c["circle_id"]: {"rank": c.get("last_known_rank", 999), "last_updated": c.get("last_updated", 0)} for c in clubs_data}
 
-top500_leavers_raw = []
+    top500_leavers_raw = []
+    bulk_updates = []
     
-if missing_players:
+    if missing_players:
         blacklist_col = client["uma_tracker"]["blacklist"]
         
         for player in missing_players:
@@ -93,7 +94,6 @@ if missing_players:
     dropped_clubs = [c for c, count in leaver_counts.items() if count >= 25]
     is_api_outage = len(dropped_clubs) > 60
     
-    bulk_updates = []
     bot_purge_ids = []
     individual_leavers = []
 
