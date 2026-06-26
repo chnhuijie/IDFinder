@@ -49,7 +49,7 @@ def process_post_scan_transfers():
 
 top500_leavers_raw = []
     
-    if missing_players:
+if missing_players:
         blacklist_col = client["uma_tracker"]["blacklist"]
         
         for player in missing_players:
