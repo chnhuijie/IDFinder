@@ -63,6 +63,27 @@ def process_post_scan_transfers():
             if club_details["rank"] <= 500:
                 player_mid = player.get("mid")
                 
+                try:
+                    profile_url = f"https://uma.moe/api/v4/user/profile/{player_mid}"
+                    headers = {"User-Agent": "IDFinder-Verifier"}
+                    if UMA_API_KEY:
+                        headers["X-API-Key"] = UMA_API_KEY
+                    
+                    prof_res = requests.get(profile_url, headers=headers, timeout=5)
+                    if prof_res.status_code == 200:
+                        prof_data = prof_res.json()
+                        live_circle = prof_data.get("circle")
+                        
+                        if live_circle and live_circle.get("circle_id") == club_id:
+                            bulk_updates.append(UpdateOne(
+                                {"_id": player["_id"]}, 
+                                {"$set": {"last_seen": time.time()}}
+                            ))
+                            print(f"FLICKER CAUGHT: {player.get('name')} is still in {player.get('club')}. Ignored.")
+                            continue 
+                except Exception as e:
+                    print(f"Anti-Flicker check failed for {player_mid}: {e}")
+                
                 is_bot, bl_reason = check_player_integrity(player_mid, UMA_API_KEY)
                 
                 if is_bot:
@@ -79,6 +100,7 @@ def process_post_scan_transfers():
                     
                     print(f"BOT CAUGHT: {player.get('name')} ({player_mid}) - {bl_reason}")
                     continue 
+                # -------------------------------
 
                 top500_leavers_raw.append({
                     "_id": player["_id"],
