@@ -50,9 +50,10 @@ def process_post_scan_transfers():
     top500_leavers_raw = []
     bulk_updates = []
     
-if missing_players:
+    if missing_players:
         blacklist_col = client["uma_tracker"]["blacklist"]
         
+        # 1. Fetch your existing blacklist into memory to save API calls
         known_botters = set(doc["mid"] for doc in blacklist_col.find({}, {"mid": 1}))
         
         for player in missing_players:
@@ -65,15 +66,18 @@ if missing_players:
             if club_details["rank"] <= 500:
                 player_mid = player.get("mid")
                 
+                # --- LOCAL BLACKLIST INTERCEPT ---
                 if int(player_mid) in known_botters:
                     bulk_updates.append(UpdateOne(
                         {"_id": player["_id"]}, 
                         {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
                     ))
-                    continue 
+                    continue # Already a known botter, bypass Discord entirely
                 
+                # --- ANTI RATE-LIMIT DELAY ---
                 time.sleep(0.5)
 
+                # --- ANTI-FLICKER & BAN DETECTION ---
                 try:
                     profile_url = f"https://uma.moe/api/v4/user/profile/{player_mid}"
                     headers = {"User-Agent": "IDFinder-Verifier"}
@@ -82,6 +86,7 @@ if missing_players:
                     
                     prof_res = requests.get(profile_url, headers=headers, timeout=5)
                     
+                    # If 404, the account was likely deleted/banned in the wave
                     if prof_res.status_code == 404:
                         bulk_updates.append(UpdateOne(
                             {"_id": player["_id"]}, 
@@ -90,6 +95,7 @@ if missing_players:
                         print(f"BAN DETECTED (404): {player.get('name')}. Ignored.")
                         continue
 
+                    # If 200, check for API Data Flicker
                     if prof_res.status_code == 200:
                         prof_data = prof_res.json()
                         live_circle = prof_data.get("circle")
@@ -103,7 +109,8 @@ if missing_players:
                             continue 
                 except Exception as e:
                     print(f"Profile check failed for {player_mid}: {e}")
-                    
+                
+                # --- THE VALIDATOR INTERCEPT ---
                 is_bot, bl_reason = check_player_integrity(player_mid, UMA_API_KEY)
                 
                 if is_bot:
@@ -121,6 +128,7 @@ if missing_players:
                     print(f"BOT CAUGHT: {player.get('name')} ({player_mid}) - {bl_reason}")
                     continue 
 
+                # Genuine Leaver
                 top500_leavers_raw.append({
                     "_id": player["_id"],
                     "id": player_mid, 
@@ -203,10 +211,7 @@ if missing_players:
         messages.append("**Scan Complete:** No movement spotted in tracked clubs.")
 
     messages.append("\n*Data provided by [uma.moe](https://uma.moe/)*")
-
-    send_discord_in_chunks(DISCORD_WEBHOOK_URL, messages)
     
-    db.update_many({"last_seen": {"$gt": cutoff_time}}, {"$set": {"is_new_flag": False, "is_transfer_flag": False}})
     send_discord_in_chunks(DISCORD_WEBHOOK_URL, messages)
     
     db.update_many({"last_seen": {"$gt": cutoff_time}}, {"$set": {"is_new_flag": False, "is_transfer_flag": False}})
