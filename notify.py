@@ -183,6 +183,11 @@ def process_post_scan_transfers():
     else:
         messages.append("**Scan Complete:** No movement spotted in tracked clubs.")
 
+    messages.append("\n*Data provided by [uma.moe](https://uma.moe/)*")
+
+    send_discord_in_chunks(DISCORD_WEBHOOK_URL, messages)
+    
+    db.update_many({"last_seen": {"$gt": cutoff_time}}, {"$set": {"is_new_flag": False, "is_transfer_flag": False}})
     send_discord_in_chunks(DISCORD_WEBHOOK_URL, messages)
     
     db.update_many({"last_seen": {"$gt": cutoff_time}}, {"$set": {"is_new_flag": False, "is_transfer_flag": False}})
