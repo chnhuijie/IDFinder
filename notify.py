@@ -50,8 +50,10 @@ def process_post_scan_transfers():
     top500_leavers_raw = []
     bulk_updates = []
     
-    if missing_players:
+if missing_players:
         blacklist_col = client["uma_tracker"]["blacklist"]
+        
+        known_botters = set(doc["mid"] for doc in blacklist_col.find({}, {"mid": 1}))
         
         for player in missing_players:
             club_id = player.get("club_id")
@@ -63,6 +65,15 @@ def process_post_scan_transfers():
             if club_details["rank"] <= 500:
                 player_mid = player.get("mid")
                 
+                if int(player_mid) in known_botters:
+                    bulk_updates.append(UpdateOne(
+                        {"_id": player["_id"]}, 
+                        {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
+                    ))
+                    continue 
+                
+                time.sleep(0.5)
+
                 try:
                     profile_url = f"https://uma.moe/api/v4/user/profile/{player_mid}"
                     headers = {"User-Agent": "IDFinder-Verifier"}
@@ -70,6 +81,15 @@ def process_post_scan_transfers():
                         headers["X-API-Key"] = UMA_API_KEY
                     
                     prof_res = requests.get(profile_url, headers=headers, timeout=5)
+                    
+                    if prof_res.status_code == 404:
+                        bulk_updates.append(UpdateOne(
+                            {"_id": player["_id"]}, 
+                            {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
+                        ))
+                        print(f"BAN DETECTED (404): {player.get('name')}. Ignored.")
+                        continue
+
                     if prof_res.status_code == 200:
                         prof_data = prof_res.json()
                         live_circle = prof_data.get("circle")
@@ -82,8 +102,8 @@ def process_post_scan_transfers():
                             print(f"FLICKER CAUGHT: {player.get('name')} is still in {player.get('club')}. Ignored.")
                             continue 
                 except Exception as e:
-                    print(f"Anti-Flicker check failed for {player_mid}: {e}")
-                
+                    print(f"Profile check failed for {player_mid}: {e}")
+                    
                 is_bot, bl_reason = check_player_integrity(player_mid, UMA_API_KEY)
                 
                 if is_bot:
@@ -100,7 +120,6 @@ def process_post_scan_transfers():
                     
                     print(f"BOT CAUGHT: {player.get('name')} ({player_mid}) - {bl_reason}")
                     continue 
-                # -------------------------------
 
                 top500_leavers_raw.append({
                     "_id": player["_id"],
