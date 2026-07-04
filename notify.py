@@ -27,6 +27,9 @@ def send_discord_in_chunks(webhook_url, messages):
         requests.post(webhook_url, json={"content": "\n".join(current_chunk)}, timeout=15)
 
 def process_post_scan_transfers():
+    print("Letting the API token bucket reset after the massive matrix scrape...")
+    time.sleep(65) # 65 seconds guarantees a completely fresh 1-minute rate limit window
+    
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
     clubs_col = client["uma_tracker"]["clubs"]
@@ -57,7 +60,6 @@ def process_post_scan_transfers():
         known_botters = set(doc["mid"] for doc in blacklist_col.find({}, {"mid": 1}))
         
         # --- ULTRA-SAFE BATCH PROCESSING LOOP ---
-        # Process in smaller chunks of 10 to protect the Azure IP
         batch_size = 10
         for chunk_idx in range(0, len(missing_players), batch_size):
             batch = missing_players[chunk_idx : chunk_idx + batch_size]
@@ -88,11 +90,17 @@ def process_post_scan_transfers():
                         profile_url = f"https://uma.moe/api/v4/user/profile/{player_mid}"
                         prof_data = safe_get(profile_url, UMA_API_KEY)
                         
-                        # THE COOLDOWN FIX
+                        # --- THE COOLDOWN & RETRY FIX ---
                         if prof_data == "RATE_LIMIT":
-                            print(f"Rate limited on Profile API for {player_mid}. Server bucket is hot! Cooling down for 15 seconds...")
-                            time.sleep(15)  
-                            continue        
+                            print(f"Rate limited on Profile API for {player_mid}. Penalty box active! Freezing for 60 seconds...")
+                            time.sleep(60)  
+                            print(f"Retrying {player_mid}...")
+                            
+                            prof_data = safe_get(profile_url, UMA_API_KEY) # Second attempt
+                            
+                            if prof_data == "RATE_LIMIT":
+                                print(f"Still blocked after deep freeze. Skipping {player_mid} to protect pipeline.")
+                                continue        
 
                         # 404: Account was wiped in a ban wave. Skip the Shame API entirely.
                         if prof_data == "NOT_FOUND":
