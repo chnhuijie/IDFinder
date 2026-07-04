@@ -3,7 +3,7 @@ import time
 import requests
 from collections import Counter
 from pymongo import MongoClient, UpdateOne
-from utils import check_player_integrity 
+from utils import check_player_integrity, safe_get 
 
 UMA_API_KEY = os.getenv("UMA_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
@@ -56,7 +56,7 @@ def process_post_scan_transfers():
         # 1. Fetch existing blacklist into memory
         known_botters = set(doc["mid"] for doc in blacklist_col.find({}, {"mid": 1}))
         
-        # --- NEW: BATCH PROCESSING LOOP ---
+        # --- BATCH PROCESSING LOOP ---
         # Process in chunks of 15 to match the stable bot architecture
         batch_size = 15
         for chunk_idx in range(0, len(missing_players), batch_size):
@@ -86,14 +86,14 @@ def process_post_scan_transfers():
                     
                     try:
                         profile_url = f"https://uma.moe/api/v4/user/profile/{player_mid}"
-                        headers = {"User-Agent": "IDFinder-Verifier"}
-                        if UMA_API_KEY:
-                            headers["X-API-Key"] = UMA_API_KEY
                         
-                        prof_res = requests.get(profile_url, headers=headers, timeout=10)
+                        prof_data = safe_get(profile_url, UMA_API_KEY)
                         
-                        # 404: Account was wiped in a ban wave. Skip the Shame API entirely.
-                        if prof_res.status_code == 404:
+                        if prof_data == "RATE_LIMIT":
+                            print(f"Rate limited on Profile API for {player_mid}. Skipping to protect pipeline.")
+                            continue
+
+                        if prof_data == "NOT_FOUND":
                             bulk_updates.append(UpdateOne(
                                 {"_id": player["_id"]}, 
                                 {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
@@ -101,9 +101,7 @@ def process_post_scan_transfers():
                             print(f"BAN DETECTED (404): {player.get('name')}. Ignored.")
                             continue
 
-                        # 200: Check for Data Flicker. Skip the Shame API entirely if they didn't really leave.
-                        if prof_res.status_code == 200:
-                            prof_data = prof_res.json()
+                        if isinstance(prof_data, dict):
                             live_circle = prof_data.get("circle")
                             
                             if live_circle and live_circle.get("circle_id") == club_id:
@@ -116,13 +114,13 @@ def process_post_scan_transfers():
                     except Exception as e:
                         print(f"Profile check failed for {player_mid}: {e}")
                     
-                    # --- STEP 2: SHAME API CHECK ---
-                    # If they passed Step 1, they are a genuine leaver. 
-                    # Strictly enforce 360req/min (0.17s) limit again BEFORE hitting the Shame API.
-                    time.sleep(0.17)
+                    time.sleep(1.5) 
                     
-                    # Players who never hit Top 100 will safely return (False, None) from utils.py
                     is_bot, bl_reason = check_player_integrity(player_mid, UMA_API_KEY)
+                    
+                    if is_bot is None and bl_reason == "API_BLOCKED":
+                        print(f"API Blocked for {player_mid}. Skipping player to protect database.")
+                        continue 
                     
                     if is_bot:
                         blacklist_col.update_one(
@@ -139,7 +137,6 @@ def process_post_scan_transfers():
                         print(f"BOT CAUGHT: {player.get('name')} ({player_mid}) - {bl_reason}")
                         continue 
 
-                    # Passed all checks! Genuine Top 500 Leaver.
                     top500_leavers_raw.append({
                         "_id": player["_id"],
                         "id": player_mid, 
@@ -148,6 +145,8 @@ def process_post_scan_transfers():
                         "old_club_id": club_id, 
                         "rank": club_details["rank"]
                     })
+
+            time.sleep(2.0)
 
     leaver_counts = Counter((l['old_club_id'], l['old_club']) for l in top500_leavers_raw)
     
