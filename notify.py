@@ -56,9 +56,9 @@ def process_post_scan_transfers():
         # 1. Fetch existing blacklist into memory
         known_botters = set(doc["mid"] for doc in blacklist_col.find({}, {"mid": 1}))
         
-        # --- BATCH PROCESSING LOOP ---
-        # Process in chunks of 15 to match the stable bot architecture
-        batch_size = 15
+        # --- ULTRA-SAFE BATCH PROCESSING LOOP ---
+        # Process in smaller chunks of 10 to protect the Azure IP
+        batch_size = 10
         for chunk_idx in range(0, len(missing_players), batch_size):
             batch = missing_players[chunk_idx : chunk_idx + batch_size]
             
@@ -81,18 +81,20 @@ def process_post_scan_transfers():
                         continue
                     
                     # --- STEP 1: PROFILE CHECK (Anti-Flicker & 404 Catcher) ---
-                    # Strictly enforce 360req/min (0.17s) limit BEFORE hitting the profile
-                    time.sleep(0.17)
+                    # Ultra-Safe Pacing: 1.0s delay
+                    time.sleep(1.0)
                     
                     try:
                         profile_url = f"https://uma.moe/api/v4/user/profile/{player_mid}"
-                        
                         prof_data = safe_get(profile_url, UMA_API_KEY)
                         
+                        # THE COOLDOWN FIX
                         if prof_data == "RATE_LIMIT":
-                            print(f"Rate limited on Profile API for {player_mid}. Skipping to protect pipeline.")
-                            continue
+                            print(f"Rate limited on Profile API for {player_mid}. Server bucket is hot! Cooling down for 15 seconds...")
+                            time.sleep(15)  
+                            continue        
 
+                        # 404: Account was wiped in a ban wave. Skip the Shame API entirely.
                         if prof_data == "NOT_FOUND":
                             bulk_updates.append(UpdateOne(
                                 {"_id": player["_id"]}, 
@@ -101,6 +103,7 @@ def process_post_scan_transfers():
                             print(f"BAN DETECTED (404): {player.get('name')}. Ignored.")
                             continue
 
+                        # 200: Check for Data Flicker
                         if isinstance(prof_data, dict):
                             live_circle = prof_data.get("circle")
                             
@@ -114,13 +117,16 @@ def process_post_scan_transfers():
                     except Exception as e:
                         print(f"Profile check failed for {player_mid}: {e}")
                     
-                    time.sleep(1.5) 
+                    # --- STEP 2: SHAME API CHECK ---
+                    # Ultra-Safe Pacing: 2.5s delay to keep Cloudflare happy
+                    time.sleep(2.5) 
                     
                     is_bot, bl_reason = check_player_integrity(player_mid, UMA_API_KEY)
                     
+                    # --- THE FAIL-CLOSED INTERCEPT ---
                     if is_bot is None and bl_reason == "API_BLOCKED":
                         print(f"API Blocked for {player_mid}. Skipping player to protect database.")
-                        continue 
+                        continue # Skips all database writes. They will be retried on the next run.
                     
                     if is_bot:
                         blacklist_col.update_one(
@@ -137,6 +143,7 @@ def process_post_scan_transfers():
                         print(f"BOT CAUGHT: {player.get('name')} ({player_mid}) - {bl_reason}")
                         continue 
 
+                    # Passed all checks! Genuine Top 500 Leaver.
                     top500_leavers_raw.append({
                         "_id": player["_id"],
                         "id": player_mid, 
@@ -146,7 +153,8 @@ def process_post_scan_transfers():
                         "rank": club_details["rank"]
                     })
 
-            time.sleep(2.0)
+            # THE DEEP BREATHER: Rest for 5 full seconds after processing 10 IDs.
+            time.sleep(5.0)
 
     leaver_counts = Counter((l['old_club_id'], l['old_club']) for l in top500_leavers_raw)
     
