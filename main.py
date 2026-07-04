@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import random
 import logging
 import dateutil.parser
 from datetime import datetime
@@ -18,23 +17,34 @@ BASE_API = "https://uma.moe/api/v4/circles"
 
 def safe_get(url, retries=3):
     headers = {
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "application/json",
         "Referer": "https://uma.moe/",
-        "Origin": "https://uma.moe"
+        "Origin": "https://uma.moe",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     if UMA_API_KEY:
         headers["X-API-Key"] = UMA_API_KEY
         
     for attempt in range(retries):
-        time.sleep(random.uniform(4.0, 8.0)) 
+        # EXACT RATE LIMIT ENFORCEMENT: 120 req/min (0.50s) + 0.05s safety buffer
+        time.sleep(0.55) 
+        
         try:
-            response = requests.get(url, headers=headers, impersonate="chrome120", timeout=20)
+            response = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
+            
             if response.status_code == 200:
                 return response.json()
+            elif response.status_code == 429:
+                log.warning(f"[429 Rate Limit] Server cooling down. Sleeping 3s (Attempt {attempt+1})")
+                time.sleep(3)
+                continue
+                
             log.warning(f"API returned {response.status_code} on attempt {attempt+1}")
         except Exception as e:
             log.warning(f"Request failed: {e} on attempt {attempt+1}")
-        time.sleep(10)
+            
+        time.sleep(2) # Brief pause on generic network drops before retry
+        
     raise RuntimeError(f"Failed to fetch {url} after {retries} attempts.")
 
 def process_club_sub_batch(api_start, api_end):
@@ -57,7 +67,7 @@ def process_club_sub_batch(api_start, api_end):
     target_clubs = data["circles"][slice_start:slice_end]
     
     if len(target_clubs) == 0:
-        log.warning(f" API List empty. Switching to Database Fallback Mode...")
+        log.warning("API List empty. Switching to Database Fallback Mode...")
         db_clubs = list(clubs_col.find({"last_known_rank": {"$gte": api_start + 1, "$lte": api_end}}).sort("last_known_rank", 1))
         if not db_clubs:
             client.close()
@@ -77,6 +87,10 @@ def process_club_sub_batch(api_start, api_end):
     current_scan_time = time.time()
     stream_buffer = []
     
+    # --- GLOBAL BATCH ARRAYS ---
+    global_club_ops = []
+    global_member_ops = []
+    
     for club_summary in target_clubs:
         c_id = club_summary.get("circle_id")
         club_name = club_summary.get("name")
@@ -95,23 +109,23 @@ def process_club_sub_batch(api_start, api_end):
                 official_count = club_info_temp.get("member_count")
                 actual_count = len(temp_data.get("members", []))
                 
+                # Handling Data Flicker (Missing Roster Members)
                 if official_count is not None and actual_count < official_count:
                     if attempt < max_payload_retries - 1:
-                        log.warning(f"⚠️ API Glitch for {club_name}: Got {actual_count}/{official_count} members. Retrying (Attempt {attempt+1}/{max_payload_retries})...")
-                        time.sleep(5)
+                        log.warning(f"⚠️ API Glitch for {club_name}: Got {actual_count}/{official_count} members. Retrying...")
+                        time.sleep(3)
                         continue
                     else:
-                        log.warning(f"⚠️ Exhausted retries for {club_name}. Cache mismatch persists. Accepting {actual_count} members to avoid dropping club.")
+                        log.warning(f"⚠️ Exhausted retries for {club_name}. Cache mismatch persists. Accepting {actual_count} members.")
                 
                 circle_data = temp_data
                 break 
                 
             except Exception as e:
                 log.error(f"Failed to fetch details for {club_name} on attempt {attempt+1}: {e}")
-                time.sleep(5)
                 
         if not circle_data or "members" not in circle_data:
-            log.error(f"❌ Completely failed to get valid roster for {club_name} after {max_payload_retries} attempts. Skipping.")
+            log.error(f"❌ Completely failed to get valid roster for {club_name}. Skipping.")
             continue
             
         club_info = circle_data.get("circle", {})
@@ -132,27 +146,34 @@ def process_club_sub_batch(api_start, api_end):
             log.warning(f"⚠️ Roster for {club_name} evaluated to 0 members. Skipping update to protect DB.")
             continue
             
-        clubs_col.update_one({"circle_id": c_id}, {"$set": {"name": club_name, "last_known_rank": club_rank, "last_updated": current_scan_time, "raw_data": club_info}}, upsert=True)
+        # Queue the Club Update
+        global_club_ops.append(UpdateOne(
+            {"circle_id": c_id}, 
+            {"$set": {"name": club_name, "last_known_rank": club_rank, "last_updated": current_scan_time, "raw_data": club_info}}, 
+            upsert=True
+        ))
 
+        # STRICT ID PARSING: Aggressive digit extraction
         viewer_ids = []
+        clean_members = []
         for m in active_members:
-            try:
-                viewer_ids.append(int(m.get("viewer_id")))
-            except (TypeError, ValueError):
-                viewer_ids.append(m.get("viewer_id"))
+            raw_vid = str(m.get("viewer_id", ""))
+            clean_vid = ''.join(filter(str.isdigit, raw_vid))
+            
+            if not clean_vid:
+                log.error(f"Database Protection: Dropped corrupted ID {raw_vid} from {club_name}")
+                continue
+                
+            valid_id = int(clean_vid)
+            viewer_ids.append(valid_id)
+            m["safe_viewer_id"] = valid_id
+            clean_members.append(m)
 
         existing_members = {m["mid"]: m for m in members_col.find({"mid": {"$in": viewer_ids}})}
         
-        member_bulk_ops = []
-        for member in active_members:
-            raw_vid = member.get("viewer_id")
-            try:
-                viewer_id = int(raw_vid)
-            except (TypeError, ValueError):
-                viewer_id = raw_vid
-                
+        for member in clean_members:
+            viewer_id = member["safe_viewer_id"]
             trainer_name = member.get("trainer_name") or member.get("name") or "Unknown"
-
             current_total_fans = member.get("fans", 0)
             prev_data = existing_members.get(viewer_id, {})
             
@@ -170,18 +191,32 @@ def process_club_sub_batch(api_start, api_end):
             if prev_data.get("club_id") and prev_data.get("club_id") != c_id:
                 update_doc["$set"].update({"is_transfer_flag": True, "previous_club_id": prev_data.get("club_id")})
             
-            member_bulk_ops.append(UpdateOne({"mid": viewer_id}, update_doc, upsert=True))
+            # Queue the Member Update
+            global_member_ops.append(UpdateOne({"mid": viewer_id}, update_doc, upsert=True))
             
-        if member_bulk_ops:
-            members_col.bulk_write(member_bulk_ops, ordered=False)
-
-        formatted_line = f"**Synced:** `{club_name}` (Rank {club_rank}) | Active: {len(active_members)}/30"
+        formatted_line = f"**Synced:** `{club_name}` (Rank {club_rank}) | Active: {len(clean_members)}/30"
         stream_buffer.append((club_rank, formatted_line))
 
         if len(stream_buffer) == 20:
             if DISCORD_WEBHOOK_URL:
                 requests.post(DISCORD_WEBHOOK_URL, json={"content": f"**Data Stream: Ranks {min(r for r,l in stream_buffer)} to {max(r for r,l in stream_buffer)}**\n" + "\n".join(l for r,l in stream_buffer)}, timeout=10)
             stream_buffer = []
+        # --- NEW: FLUSH LEFTOVER DISCORD MESSAGES ---
+    if stream_buffer and DISCORD_WEBHOOK_URL:
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": f"**Data Stream: Ranks {min(r for r,l in stream_buffer)} to {max(r for r,l in stream_buffer)}**\n" + "\n".join(l for r,l in stream_buffer)}, timeout=10)
+            
+    # --- EXECUTE GLOBAL BATCH WRITES ---
+    if global_club_ops:
+        log.info(f"Executing Global DB Batch: {len(global_club_ops)} Clubs...")
+            
+    # --- EXECUTE GLOBAL BATCH WRITES ---
+    if global_club_ops:
+        log.info(f"Executing Global DB Batch: {len(global_club_ops)} Clubs...")
+        clubs_col.bulk_write(global_club_ops, ordered=False)
+        
+    if global_member_ops:
+        log.info(f"Executing Global DB Batch: {len(global_member_ops)} Players...")
+        members_col.bulk_write(global_member_ops, ordered=False)
             
     client.close()
 
