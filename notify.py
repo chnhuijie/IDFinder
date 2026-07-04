@@ -53,90 +53,101 @@ def process_post_scan_transfers():
     if missing_players:
         blacklist_col = client["uma_tracker"]["blacklist"]
         
-        # 1. Fetch your existing blacklist into memory to save API calls
+        # 1. Fetch existing blacklist into memory
         known_botters = set(doc["mid"] for doc in blacklist_col.find({}, {"mid": 1}))
         
-        for player in missing_players:
-            club_id = player.get("club_id")
-            club_details = clubs_info.get(club_id, {"rank": 999, "last_updated": 0})
+        # --- NEW: BATCH PROCESSING LOOP ---
+        # Process in chunks of 15 to match the stable bot architecture
+        batch_size = 15
+        for chunk_idx in range(0, len(missing_players), batch_size):
+            batch = missing_players[chunk_idx : chunk_idx + batch_size]
             
-            if club_details["last_updated"] <= cutoff_time:
-                continue 
+            for player in batch:
+                club_id = player.get("club_id")
+                club_details = clubs_info.get(club_id, {"rank": 999, "last_updated": 0})
                 
-            if club_details["rank"] <= 500:
-                player_mid = player.get("mid")
-                
-                # --- LOCAL BLACKLIST INTERCEPT ---
-                if int(player_mid) in known_botters:
-                    bulk_updates.append(UpdateOne(
-                        {"_id": player["_id"]}, 
-                        {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
-                    ))
-                    continue # Already a known botter, bypass Discord entirely
-                
-                # --- ANTI RATE-LIMIT DELAY ---
-                time.sleep(0.5)
-
-                # --- ANTI-FLICKER & BAN DETECTION ---
-                try:
-                    profile_url = f"https://uma.moe/api/v4/user/profile/{player_mid}"
-                    headers = {"User-Agent": "IDFinder-Verifier"}
-                    if UMA_API_KEY:
-                        headers["X-API-Key"] = UMA_API_KEY
+                if club_details["last_updated"] <= cutoff_time:
+                    continue 
                     
-                    prof_res = requests.get(profile_url, headers=headers, timeout=5)
+                if club_details["rank"] <= 500:
+                    player_mid = player.get("mid")
                     
-                    # If 404, the account was likely deleted/banned in the wave
-                    if prof_res.status_code == 404:
+                    # --- LOCAL MEMORY INTERCEPT ---
+                    if int(player_mid) in known_botters:
                         bulk_updates.append(UpdateOne(
                             {"_id": player["_id"]}, 
                             {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
                         ))
-                        print(f"BAN DETECTED (404): {player.get('name')}. Ignored.")
                         continue
-
-                    # If 200, check for API Data Flicker
-                    if prof_res.status_code == 200:
-                        prof_data = prof_res.json()
-                        live_circle = prof_data.get("circle")
+                    
+                    # --- STEP 1: PROFILE CHECK (Anti-Flicker & 404 Catcher) ---
+                    # Strictly enforce 360req/min (0.17s) limit BEFORE hitting the profile
+                    time.sleep(0.17)
+                    
+                    try:
+                        profile_url = f"https://uma.moe/api/v4/user/profile/{player_mid}"
+                        headers = {"User-Agent": "IDFinder-Verifier"}
+                        if UMA_API_KEY:
+                            headers["X-API-Key"] = UMA_API_KEY
                         
-                        if live_circle and live_circle.get("circle_id") == club_id:
+                        prof_res = requests.get(profile_url, headers=headers, timeout=10)
+                        
+                        # 404: Account was wiped in a ban wave. Skip the Shame API entirely.
+                        if prof_res.status_code == 404:
                             bulk_updates.append(UpdateOne(
                                 {"_id": player["_id"]}, 
-                                {"$set": {"last_seen": time.time()}}
+                                {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
                             ))
-                            print(f"FLICKER CAUGHT: {player.get('name')} is still in {player.get('club')}. Ignored.")
-                            continue 
-                except Exception as e:
-                    print(f"Profile check failed for {player_mid}: {e}")
-                
-                # --- THE VALIDATOR INTERCEPT ---
-                is_bot, bl_reason = check_player_integrity(player_mid, UMA_API_KEY)
-                
-                if is_bot:
-                    blacklist_col.update_one(
-                        {"mid": int(player_mid)}, 
-                        {"$set": {"reason": bl_reason, "updated_at": time.time()}}, 
-                        upsert=True
-                    )
-                    
-                    bulk_updates.append(UpdateOne(
-                        {"_id": player["_id"]}, 
-                        {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
-                    ))
-                    
-                    print(f"BOT CAUGHT: {player.get('name')} ({player_mid}) - {bl_reason}")
-                    continue 
+                            print(f"BAN DETECTED (404): {player.get('name')}. Ignored.")
+                            continue
 
-                # Genuine Leaver
-                top500_leavers_raw.append({
-                    "_id": player["_id"],
-                    "id": player_mid, 
-                    "name": player.get("name", "Unknown"), 
-                    "old_club": player.get("club"), 
-                    "old_club_id": club_id, 
-                    "rank": club_details["rank"]
-                })
+                        # 200: Check for Data Flicker. Skip the Shame API entirely if they didn't really leave.
+                        if prof_res.status_code == 200:
+                            prof_data = prof_res.json()
+                            live_circle = prof_data.get("circle")
+                            
+                            if live_circle and live_circle.get("circle_id") == club_id:
+                                bulk_updates.append(UpdateOne(
+                                    {"_id": player["_id"]}, 
+                                    {"$set": {"last_seen": time.time()}}
+                                ))
+                                print(f"FLICKER CAUGHT: {player.get('name')} is still in {player.get('club')}. Ignored.")
+                                continue 
+                    except Exception as e:
+                        print(f"Profile check failed for {player_mid}: {e}")
+                    
+                    # --- STEP 2: SHAME API CHECK ---
+                    # If they passed Step 1, they are a genuine leaver. 
+                    # Strictly enforce 360req/min (0.17s) limit again BEFORE hitting the Shame API.
+                    time.sleep(0.17)
+                    
+                    # Players who never hit Top 100 will safely return (False, None) from utils.py
+                    is_bot, bl_reason = check_player_integrity(player_mid, UMA_API_KEY)
+                    
+                    if is_bot:
+                        blacklist_col.update_one(
+                            {"mid": int(player_mid)}, 
+                            {"$set": {"reason": bl_reason, "updated_at": time.time()}}, 
+                            upsert=True
+                        )
+                        
+                        bulk_updates.append(UpdateOne(
+                            {"_id": player["_id"]}, 
+                            {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
+                        ))
+                        
+                        print(f"BOT CAUGHT: {player.get('name')} ({player_mid}) - {bl_reason}")
+                        continue 
+
+                    # Passed all checks! Genuine Top 500 Leaver.
+                    top500_leavers_raw.append({
+                        "_id": player["_id"],
+                        "id": player_mid, 
+                        "name": player.get("name", "Unknown"), 
+                        "old_club": player.get("club"), 
+                        "old_club_id": club_id, 
+                        "rank": club_details["rank"]
+                    })
 
     leaver_counts = Counter((l['old_club_id'], l['old_club']) for l in top500_leavers_raw)
     
