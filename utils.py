@@ -28,16 +28,20 @@ def safe_get(url, api_key=None):
     return None
 
 def check_player_integrity(viewer_id, api_key=None, retries=3):
-    """Queries the Hall of Shame API matching the bot's structural parameters."""
+    """Queries the Hall of Shame API and reports strict failures."""
     shame_url = f"{BASE_API}/shame/viewer/{viewer_id}?days=60"
     
     for attempt in range(retries):
         data = safe_get(shame_url, api_key)
         
         if data == "RATE_LIMIT":
-            time.sleep(2)
+            # Progressive cooldown: Wait 5s on first strike, 10s on second strike
+            cooldown = 5 + (attempt * 5)
+            print(f"Cooling down Shame API for {cooldown} seconds...")
+            time.sleep(cooldown)
             continue
             
+        # NOT_FOUND means they never hit Top 100, which means they are clean.
         if data == "NOT_FOUND" or not data or not data.get("score"):
             return False, None
             
@@ -60,4 +64,5 @@ def check_player_integrity(viewer_id, api_key=None, retries=3):
                 
         return False, None
 
-    return False, None
+    # If it exhausts all retries and still hits 429s, RETURN A FAILURE STATE instead of False
+    return None, "API_BLOCKED"
