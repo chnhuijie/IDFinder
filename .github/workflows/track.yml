@@ -66,7 +66,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Dependencies
-        run: pip install requests pymongo python-dateutil
+        run: pip install requests pymongo python-dateutil curl_cffi
 
       - name: Run notify.py
         env:
