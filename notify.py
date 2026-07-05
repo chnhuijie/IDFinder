@@ -2,8 +2,8 @@ import os
 import time
 import requests
 from collections import Counter
-from pymongo import MongoClient, UpdateOne
-from utils import check_player_integrity, safe_get 
+from pymongo import MongoClient, UpdateOne, DeleteOne
+from utils import safe_get 
 
 UMA_API_KEY = os.getenv("UMA_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
@@ -27,12 +27,13 @@ def send_discord_in_chunks(webhook_url, messages):
         requests.post(webhook_url, json={"content": "\n".join(current_chunk)}, timeout=15)
 
 def process_post_scan_transfers():
-    print("Letting the API token bucket reset after the massive matrix scrape...")
-    time.sleep(65) # 65 seconds guarantees a completely fresh 1-minute rate limit window
+    print("Initializing high-speed notification sweep...")
+    time.sleep(15) # Brief buffer to ensure the 1-minute rate limit window is clean
     
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
     clubs_col = client["uma_tracker"]["clubs"]
+    blacklist_col = client["uma_tracker"]["blacklist"]
     
     cutoff_time = time.time() - 14400
     
@@ -51,125 +52,85 @@ def process_post_scan_transfers():
         clubs_info = {c["circle_id"]: {"rank": c.get("last_known_rank", 999), "last_updated": c.get("last_updated", 0)} for c in clubs_data}
 
     top500_leavers_raw = []
-    bulk_updates = []
+    
+    # --- GLOBAL RAM BATCHING ---
+    global_bulk_updates = []
     
     if missing_players:
-        blacklist_col = client["uma_tracker"]["blacklist"]
-        
-        # 1. Fetch existing blacklist into memory
         known_botters = set(doc["mid"] for doc in blacklist_col.find({}, {"mid": 1}))
         
-        # --- ULTRA-SAFE BATCH PROCESSING LOOP ---
-        batch_size = 10
-        for chunk_idx in range(0, len(missing_players), batch_size):
-            batch = missing_players[chunk_idx : chunk_idx + batch_size]
+        for player in missing_players:
+            club_id = player.get("club_id")
+            club_details = clubs_info.get(club_id, {"rank": 999, "last_updated": 0})
             
-            for player in batch:
-                club_id = player.get("club_id")
-                club_details = clubs_info.get(club_id, {"rank": 999, "last_updated": 0})
+            if club_details["last_updated"] <= cutoff_time:
+                continue 
                 
-                if club_details["last_updated"] <= cutoff_time:
-                    continue 
+            if club_details["rank"] <= 500:
+                player_mid = player.get("mid")
+                
+                if int(player_mid) in known_botters:
+                    global_bulk_updates.append(UpdateOne(
+                        {"_id": player["_id"]}, 
+                        {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
+                    ))
+                    continue
+                
+                # Fast Pacing for Profile verification (360req/min limit)
+                time.sleep(0.35) 
+                
+                try:
+                    profile_url = f"https://uma.moe/api/v4/user/profile/{player_mid}"
+                    prof_data = safe_get(profile_url, UMA_API_KEY)
                     
-                if club_details["rank"] <= 500:
-                    player_mid = player.get("mid")
-                    
-                    # --- LOCAL MEMORY INTERCEPT ---
-                    if int(player_mid) in known_botters:
-                        bulk_updates.append(UpdateOne(
-                            {"_id": player["_id"]}, 
-                            {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
-                        ))
-                        continue
-                    
-                    # --- STEP 1: PROFILE CHECK (Anti-Flicker & 404 Catcher) ---
-                    # Ultra-Safe Pacing: 1.0s delay
-                    time.sleep(1.0)
-                    
-                    try:
-                        profile_url = f"https://uma.moe/api/v4/user/profile/{player_mid}"
-                        prof_data = safe_get(profile_url, UMA_API_KEY)
+                    if prof_data == "RATE_LIMIT":
+                        print(f"Rate limited on Profile API for {player_mid}. Freezing for 45 seconds...")
+                        time.sleep(45)  
                         
-                        # --- THE COOLDOWN & RETRY FIX ---
+                        prof_data = safe_get(profile_url, UMA_API_KEY) # Second attempt
                         if prof_data == "RATE_LIMIT":
-                            print(f"Rate limited on Profile API for {player_mid}. Penalty box active! Freezing for 60 seconds...")
-                            time.sleep(60)  
-                            print(f"Retrying {player_mid}...")
-                            
-                            prof_data = safe_get(profile_url, UMA_API_KEY) # Second attempt
-                            
-                            if prof_data == "RATE_LIMIT":
-                                print(f"Still blocked after deep freeze. Skipping {player_mid} to protect pipeline.")
-                                continue        
+                            print(f"Still blocked. Skipping {player_mid} to protect pipeline.")
+                            continue        
 
-                        # 404: Account was wiped in a ban wave. Skip the Shame API entirely.
-                        if prof_data == "NOT_FOUND":
-                            bulk_updates.append(UpdateOne(
-                                {"_id": player["_id"]}, 
-                                {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
-                            ))
-                            print(f"BAN DETECTED (404): {player.get('name')}. Ignored.")
-                            continue
-
-                        # 200: Check for Data Flicker
-                        if isinstance(prof_data, dict):
-                            live_circle = prof_data.get("circle")
-                            
-                            if live_circle and live_circle.get("circle_id") == club_id:
-                                bulk_updates.append(UpdateOne(
-                                    {"_id": player["_id"]}, 
-                                    {"$set": {"last_seen": time.time()}}
-                                ))
-                                print(f"FLICKER CAUGHT: {player.get('name')} is still in {player.get('club')}. Ignored.")
-                                continue 
-                    except Exception as e:
-                        print(f"Profile check failed for {player_mid}: {e}")
-                    
-                    # --- STEP 2: SHAME API CHECK ---
-                    # Ultra-Safe Pacing: 2.5s delay to keep Cloudflare happy
-                    time.sleep(2.5) 
-                    
-                    is_bot, bl_reason = check_player_integrity(player_mid, UMA_API_KEY)
-                    
-                    # --- THE FAIL-CLOSED INTERCEPT ---
-                    if is_bot is None and bl_reason == "API_BLOCKED":
-                        print(f"API Blocked for {player_mid}. Skipping player to protect database.")
-                        continue # Skips all database writes. They will be retried on the next run.
-                    
-                    if is_bot:
-                        blacklist_col.update_one(
-                            {"mid": int(player_mid)}, 
-                            {"$set": {"reason": bl_reason, "updated_at": time.time()}}, 
-                            upsert=True
-                        )
-                        
-                        bulk_updates.append(UpdateOne(
+                    # 404: Account was wiped/banned. Do not send to /cl.
+                    if prof_data == "NOT_FOUND":
+                        global_bulk_updates.append(UpdateOne(
                             {"_id": player["_id"]}, 
                             {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
                         ))
+                        print(f"BAN DETECTED (404): {player.get('name')}. Ignored.")
+                        continue
+
+                    # 200: Data Flicker check
+                    if isinstance(prof_data, dict):
+                        live_circle = prof_data.get("circle")
                         
-                        print(f"BOT CAUGHT: {player.get('name')} ({player_mid}) - {bl_reason}")
-                        continue 
+                        if live_circle and live_circle.get("circle_id") == club_id:
+                            global_bulk_updates.append(UpdateOne(
+                                {"_id": player["_id"]}, 
+                                {"$set": {"last_seen": time.time()}}
+                            ))
+                            print(f"FLICKER CAUGHT: {player.get('name')} is still in {player.get('club')}. Ignored.")
+                            continue 
+                            
+                except Exception as e:
+                    print(f"Profile check failed for {player_mid}: {e}")
+                    continue
 
-                    # Passed all checks! Genuine Top 500 Leaver.
-                    top500_leavers_raw.append({
-                        "_id": player["_id"],
-                        "id": player_mid, 
-                        "name": player.get("name", "Unknown"), 
-                        "old_club": player.get("club"), 
-                        "old_club_id": club_id, 
-                        "rank": club_details["rank"]
-                    })
-
-            # THE DEEP BREATHER: Rest for 5 full seconds after processing 10 IDs.
-            time.sleep(5.0)
+                # Passed anti-flicker! Add to leaver list for Discord and the /cl Applicant Queue
+                top500_leavers_raw.append({
+                    "_id": player["_id"],
+                    "id": player_mid, 
+                    "name": player.get("name", "Unknown"), 
+                    "old_club": player.get("club"), 
+                    "old_club_id": club_id, 
+                    "rank": club_details["rank"]
+                })
 
     leaver_counts = Counter((l['old_club_id'], l['old_club']) for l in top500_leavers_raw)
-    
     dropped_clubs = [c for c, count in leaver_counts.items() if count >= 25]
     is_api_outage = len(dropped_clubs) > 60
     
-    bot_purge_ids = []
     individual_leavers = []
 
     if is_api_outage:
@@ -177,19 +138,22 @@ def process_post_scan_transfers():
     else:
         for l in top500_leavers_raw:
             if (l['old_club_id'], l['old_club']) in dropped_clubs:
-                bot_purge_ids.append(l['_id'])
+                global_bulk_updates.append(DeleteOne({"_id": l["_id"]}))
             else:
                 individual_leavers.append(l)
-                bulk_updates.append(UpdateOne({"_id": l["_id"]}, {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": l["old_club"], "previous_club_id": l["old_club_id"]}}))
+                # Formats for Bamboo's `/cl` queue (club: None, previous_club: Set)
+                global_bulk_updates.append(UpdateOne(
+                    {"_id": l["_id"]}, 
+                    {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": l["old_club"], "previous_club_id": l["old_club_id"]}}
+                ))
 
-    if bulk_updates:
-        db.bulk_write(bulk_updates, ordered=False)
-    if bot_purge_ids:
-        db.delete_many({"_id": {"$in": bot_purge_ids}})
+    # Single Massive Execution to the DB
+    if global_bulk_updates:
+        print(f"Executing Global Write Array: {len(global_bulk_updates)} operations.")
+        db.bulk_write(global_bulk_updates, ordered=False)
 
     print("\n=== FINAL TRACKING SUMMARY ===")
-    print(f"Normal Top 500 Leavers Processed: {len(individual_leavers)}")
-    print(f"Bot/Ghost Accounts Purged: {len(bot_purge_ids)}")
+    print(f"Normal Top 500 Leavers Sent to /cl: {len(individual_leavers)}")
     print(f"Number of players entered tracking pool: {len(new_players)}")
     print(f"Transfers detected between tracked clubs: {len(transfers)}")
     print("==============================\n")
@@ -213,7 +177,7 @@ def process_post_scan_transfers():
                         messages.append(f"  • **{club_name}** ({rank_str}) | Lost tracking for {leaver_counts[(club_id, club_name)]} players.")
                         
                 if individual_leavers:
-                    messages.append("**Top 500 Club Leavers Detected**")
+                    messages.append("**Top 500 Club Leavers Detected** *(Awaiting /check)*")
                     for l in sorted(individual_leavers, key=lambda x: x['rank']):
                         rank_str = f"Rank {l['rank']}" if l['rank'] != 999 else "Unranked"
                         messages.append(f"  • `ID: {l['id']}` | **{l['name']}** left **{l['old_club']}** ({rank_str})")
