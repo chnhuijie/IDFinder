@@ -26,8 +26,8 @@ def safe_get(url, retries=3):
         headers["X-API-Key"] = UMA_API_KEY
         
     for attempt in range(retries):
-        # EXACT RATE LIMIT ENFORCEMENT: 120 req/min (0.50s) + 0.05s safety buffer
-        time.sleep(0.55) 
+        # THE DRIP-FEED PACING: 3.5s per request stretches 100 clubs to ~6 minutes to prevent Datacenter IP flags
+        time.sleep(3.5) 
         
         try:
             response = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
@@ -43,7 +43,7 @@ def safe_get(url, retries=3):
         except Exception as e:
             log.warning(f"Request failed: {e} on attempt {attempt+1}")
             
-        time.sleep(2) # Brief pause on generic network drops before retry
+        time.sleep(2) 
         
     raise RuntimeError(f"Failed to fetch {url} after {retries} attempts.")
 
@@ -109,7 +109,7 @@ def process_club_sub_batch(api_start, api_end):
                 official_count = club_info_temp.get("member_count")
                 actual_count = len(temp_data.get("members", []))
                 
-                # Handling Data Flicker (Missing Roster Members)
+                # 1. Check for Data Flicker (Missing Roster Members)
                 if official_count is not None and actual_count < official_count:
                     if attempt < max_payload_retries - 1:
                         log.warning(f"⚠️ API Glitch for {club_name}: Got {actual_count}/{official_count} members. Retrying...")
@@ -118,6 +118,24 @@ def process_club_sub_batch(api_start, api_end):
                     else:
                         log.warning(f"⚠️ Exhausted retries for {club_name}. Cache mismatch persists. Accepting {actual_count} members.")
                 
+                # 2. Pre-Check for Corrupted IDs (Protects Daily Scrape Pipeline)
+                bad_id_found = False
+                for m in temp_data.get("members", []):
+                    raw_vid = str(m.get("viewer_id", ""))
+                    clean_vid = ''.join(filter(str.isdigit, raw_vid))
+                    if not clean_vid:
+                        bad_id_found = True
+                        break 
+                        
+                if bad_id_found:
+                    if attempt < max_payload_retries - 1:
+                        log.warning(f"⚠️ Corrupted ID detected in {club_name} payload. Retrying API...")
+                        time.sleep(3)
+                        continue
+                    else:
+                        log.error(f"❌ Exhausted retries for {club_name}. ID corruption persists.")
+
+                # Payload is clean!
                 circle_data = temp_data
                 break 
                 
@@ -146,14 +164,12 @@ def process_club_sub_batch(api_start, api_end):
             log.warning(f"⚠️ Roster for {club_name} evaluated to 0 members. Skipping update to protect DB.")
             continue
             
-        # Queue the Club Update
         global_club_ops.append(UpdateOne(
             {"circle_id": c_id}, 
             {"$set": {"name": club_name, "last_known_rank": club_rank, "last_updated": current_scan_time, "raw_data": club_info}}, 
             upsert=True
         ))
 
-        # STRICT ID PARSING: Aggressive digit extraction
         viewer_ids = []
         clean_members = []
         for m in active_members:
@@ -191,7 +207,6 @@ def process_club_sub_batch(api_start, api_end):
             if prev_data.get("club_id") and prev_data.get("club_id") != c_id:
                 update_doc["$set"].update({"is_transfer_flag": True, "previous_club_id": prev_data.get("club_id")})
             
-            # Queue the Member Update
             global_member_ops.append(UpdateOne({"mid": viewer_id}, update_doc, upsert=True))
             
         formatted_line = f"**Synced:** `{club_name}` (Rank {club_rank}) | Active: {len(clean_members)}/30"
@@ -201,13 +216,10 @@ def process_club_sub_batch(api_start, api_end):
             if DISCORD_WEBHOOK_URL:
                 requests.post(DISCORD_WEBHOOK_URL, json={"content": f"**Data Stream: Ranks {min(r for r,l in stream_buffer)} to {max(r for r,l in stream_buffer)}**\n" + "\n".join(l for r,l in stream_buffer)}, timeout=10)
             stream_buffer = []
-        # --- NEW: FLUSH LEFTOVER DISCORD MESSAGES ---
+
+    # --- FLUSH LEFTOVER DISCORD MESSAGES ---
     if stream_buffer and DISCORD_WEBHOOK_URL:
         requests.post(DISCORD_WEBHOOK_URL, json={"content": f"**Data Stream: Ranks {min(r for r,l in stream_buffer)} to {max(r for r,l in stream_buffer)}**\n" + "\n".join(l for r,l in stream_buffer)}, timeout=10)
-            
-    # --- EXECUTE GLOBAL BATCH WRITES ---
-    if global_club_ops:
-        log.info(f"Executing Global DB Batch: {len(global_club_ops)} Clubs...")
             
     # --- EXECUTE GLOBAL BATCH WRITES ---
     if global_club_ops:
