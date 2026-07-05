@@ -26,8 +26,7 @@ def safe_get(url, retries=3):
         headers["X-API-Key"] = UMA_API_KEY
         
     for attempt in range(retries):
-        # THE DRIP-FEED PACING: 3.5s per request stretches 100 clubs to ~6 minutes to prevent Datacenter IP flags
-        time.sleep(3.5) 
+        time.sleep(1.5) 
         
         try:
             response = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
