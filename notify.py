@@ -3,9 +3,7 @@ import time
 import requests
 from collections import Counter
 from pymongo import MongoClient, UpdateOne, DeleteOne
-from utils import safe_get 
 
-UMA_API_KEY = os.getenv("UMA_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
@@ -27,15 +25,14 @@ def send_discord_in_chunks(webhook_url, messages):
         requests.post(webhook_url, json={"content": "\n".join(current_chunk)}, timeout=15)
 
 def process_post_scan_transfers():
-    print("Initializing high-speed notification sweep...")
-    time.sleep(15) # Brief buffer to ensure the 1-minute rate limit window is clean after main.py
+    print("Initializing pure-database notification sweep...")
     
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
     clubs_col = client["uma_tracker"]["clubs"]
     blacklist_col = client["uma_tracker"]["blacklist"]
     
-    cutoff_time = time.time() - 14400
+    cutoff_time = time.time() - 14400 # 4 hours ago
     
     missing_players = list(db.find({"last_seen": {"$lte": cutoff_time}, "club_id": {"$ne": None}}))
     new_players = list(db.find({"last_seen": {"$gt": cutoff_time}, "is_new_flag": True}, {"club": 1, "club_id": 1}))
@@ -52,8 +49,6 @@ def process_post_scan_transfers():
         clubs_info = {c["circle_id"]: {"rank": c.get("last_known_rank", 999), "last_updated": c.get("last_updated", 0)} for c in clubs_data}
 
     top500_leavers_raw = []
-    
-    # --- GLOBAL RAM BATCHING ---
     global_bulk_updates = []
     
     if missing_players:
@@ -63,12 +58,14 @@ def process_post_scan_transfers():
             club_id = player.get("club_id")
             club_details = clubs_info.get(club_id, {"rank": 999, "last_updated": 0})
             
+            # Anti-Outage Protection: If the club failed to scan today, skip its members.
             if club_details["last_updated"] <= cutoff_time:
                 continue 
                 
             if club_details["rank"] <= 500:
                 player_mid = player.get("mid")
                 
+                # Instantly drop known blacklisted bots without pinging Discord
                 if int(player_mid) in known_botters:
                     global_bulk_updates.append(UpdateOne(
                         {"_id": player["_id"]}, 
@@ -76,48 +73,7 @@ def process_post_scan_transfers():
                     ))
                     continue
                 
-                # Fast Pacing for Profile verification (360req/min limit)
-                time.sleep(0.35) 
-                
-                try:
-                    profile_url = f"https://uma.moe/api/v4/user/profile/{player_mid}"
-                    prof_data = safe_get(profile_url, UMA_API_KEY)
-                    
-                    if prof_data == "RATE_LIMIT":
-                        print(f"Rate limited on Profile API for {player_mid}. Freezing for 45 seconds...")
-                        time.sleep(45)  
-                        
-                        prof_data = safe_get(profile_url, UMA_API_KEY) # Second attempt
-                        if prof_data == "RATE_LIMIT":
-                            print(f"Still blocked. Skipping {player_mid} to protect pipeline.")
-                            continue        
-
-                    # 404: Account was wiped/banned. Do not send to /cl.
-                    if prof_data == "NOT_FOUND":
-                        global_bulk_updates.append(UpdateOne(
-                            {"_id": player["_id"]}, 
-                            {"$set": {"club": None, "club_id": None, "club_tier": "Unranked", "previous_club": None, "previous_club_id": None}}
-                        ))
-                        print(f"BAN DETECTED (404): {player.get('name')}. Ignored.")
-                        continue
-
-                    # 200: Data Flicker check
-                    if isinstance(prof_data, dict):
-                        live_circle = prof_data.get("circle")
-                        
-                        if live_circle and live_circle.get("circle_id") == club_id:
-                            global_bulk_updates.append(UpdateOne(
-                                {"_id": player["_id"]}, 
-                                {"$set": {"last_seen": time.time()}}
-                            ))
-                            print(f"FLICKER CAUGHT: {player.get('name')} is still in {player.get('club')}. Ignored.")
-                            continue 
-                            
-                except Exception as e:
-                    print(f"Profile check failed for {player_mid}: {e}")
-                    continue
-
-                # Passed anti-flicker! Add to leaver list for Discord and the /cl Applicant Queue
+                # Trusting the DB Delta: Assume genuine leaver
                 top500_leavers_raw.append({
                     "_id": player["_id"],
                     "id": player_mid, 
@@ -127,6 +83,7 @@ def process_post_scan_transfers():
                     "rank": club_details["rank"]
                 })
 
+    # Massive Club Dropoff Detection (Catches API Outages where entire clubs vanish)
     leaver_counts = Counter((l['old_club_id'], l['old_club']) for l in top500_leavers_raw)
     dropped_clubs = [c for c, count in leaver_counts.items() if count >= 25]
     is_api_outage = len(dropped_clubs) > 60
@@ -138,6 +95,7 @@ def process_post_scan_transfers():
     else:
         for l in top500_leavers_raw:
             if (l['old_club_id'], l['old_club']) in dropped_clubs:
+                # If a whole club disbanded or glitched, remove them from tracking
                 global_bulk_updates.append(DeleteOne({"_id": l["_id"]}))
             else:
                 individual_leavers.append(l)
@@ -204,6 +162,7 @@ def process_post_scan_transfers():
     
     send_discord_in_chunks(DISCORD_WEBHOOK_URL, messages)
     
+    # Unset the flags so they don't trigger again tomorrow
     db.update_many({"last_seen": {"$gt": cutoff_time}}, {"$set": {"is_new_flag": False, "is_transfer_flag": False}})
 
     client.close()
