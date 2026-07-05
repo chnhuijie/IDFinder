@@ -28,7 +28,7 @@ def send_discord_in_chunks(webhook_url, messages):
 
 def process_post_scan_transfers():
     print("Initializing high-speed notification sweep...")
-    time.sleep(15) # Brief buffer to ensure the 1-minute rate limit window is clean
+    time.sleep(15) # Brief buffer to ensure the 1-minute rate limit window is clean after main.py
     
     client = MongoClient(MONGO_URI)
     db = client["uma_tracker"]["members"]
