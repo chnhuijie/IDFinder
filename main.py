@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import random
 import logging
 import dateutil.parser
 from datetime import datetime
@@ -17,32 +18,26 @@ BASE_API = "https://uma.moe/api/v4/circles"
 
 def safe_get(url, retries=3):
     headers = {
-        "Accept": "application/json",
+        "Accept": "application/json, text/plain, */*",
         "Referer": "https://uma.moe/",
-        "Origin": "https://uma.moe",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "Origin": "https://uma.moe"
     }
     if UMA_API_KEY:
         headers["X-API-Key"] = UMA_API_KEY
         
     for attempt in range(retries):
-        time.sleep(1.5) 
+        # THE DRIP-FEED SHIELD: Cloaks the Azure IP by mimicking a slow, human pace.
+        time.sleep(random.uniform(4.0, 8.0)) 
         
         try:
-            response = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
-            
+            response = requests.get(url, headers=headers, impersonate="chrome120", timeout=20)
             if response.status_code == 200:
                 return response.json()
-            elif response.status_code == 429:
-                log.warning(f"[429 Rate Limit] Server cooling down. Sleeping 3s (Attempt {attempt+1})")
-                time.sleep(3)
-                continue
-                
             log.warning(f"API returned {response.status_code} on attempt {attempt+1}")
         except Exception as e:
             log.warning(f"Request failed: {e} on attempt {attempt+1}")
             
-        time.sleep(2) 
+        time.sleep(10)
         
     raise RuntimeError(f"Failed to fetch {url} after {retries} attempts.")
 
@@ -66,7 +61,7 @@ def process_club_sub_batch(api_start, api_end):
     target_clubs = data["circles"][slice_start:slice_end]
     
     if len(target_clubs) == 0:
-        log.warning("API List empty. Switching to Database Fallback Mode...")
+        log.warning(f" API List empty. Switching to Database Fallback Mode...")
         db_clubs = list(clubs_col.find({"last_known_rank": {"$gte": api_start + 1, "$lte": api_end}}).sort("last_known_rank", 1))
         if not db_clubs:
             client.close()
@@ -86,7 +81,7 @@ def process_club_sub_batch(api_start, api_end):
     current_scan_time = time.time()
     stream_buffer = []
     
-    # --- GLOBAL BATCH ARRAYS ---
+    # Global Bulk Arrays for maximum write speed
     global_club_ops = []
     global_member_ops = []
     
@@ -108,16 +103,16 @@ def process_club_sub_batch(api_start, api_end):
                 official_count = club_info_temp.get("member_count")
                 actual_count = len(temp_data.get("members", []))
                 
-                # 1. Check for Data Flicker (Missing Roster Members)
+                # Pre-Check 1: Missing Roster Members (Anti-Flicker)
                 if official_count is not None and actual_count < official_count:
                     if attempt < max_payload_retries - 1:
                         log.warning(f"⚠️ API Glitch for {club_name}: Got {actual_count}/{official_count} members. Retrying...")
-                        time.sleep(3)
+                        time.sleep(5)
                         continue
                     else:
-                        log.warning(f"⚠️ Exhausted retries for {club_name}. Cache mismatch persists. Accepting {actual_count} members.")
-                
-                # 2. Pre-Check for Corrupted IDs (Protects Daily Scrape Pipeline)
+                        log.warning(f"⚠️ Exhausted retries for {club_name}. Accepting {actual_count} members.")
+                        
+                # Pre-Check 2: Corrupted ID Catcher
                 bad_id_found = False
                 for m in temp_data.get("members", []):
                     raw_vid = str(m.get("viewer_id", ""))
@@ -129,17 +124,17 @@ def process_club_sub_batch(api_start, api_end):
                 if bad_id_found:
                     if attempt < max_payload_retries - 1:
                         log.warning(f"⚠️ Corrupted ID detected in {club_name} payload. Retrying API...")
-                        time.sleep(3)
+                        time.sleep(5)
                         continue
                     else:
                         log.error(f"❌ Exhausted retries for {club_name}. ID corruption persists.")
 
-                # Payload is clean!
                 circle_data = temp_data
                 break 
                 
             except Exception as e:
                 log.error(f"Failed to fetch details for {club_name} on attempt {attempt+1}: {e}")
+                time.sleep(5)
                 
         if not circle_data or "members" not in circle_data:
             log.error(f"❌ Completely failed to get valid roster for {club_name}. Skipping.")
@@ -171,6 +166,7 @@ def process_club_sub_batch(api_start, api_end):
 
         viewer_ids = []
         clean_members = []
+        
         for m in active_members:
             raw_vid = str(m.get("viewer_id", ""))
             clean_vid = ''.join(filter(str.isdigit, raw_vid))
@@ -189,6 +185,7 @@ def process_club_sub_batch(api_start, api_end):
         for member in clean_members:
             viewer_id = member["safe_viewer_id"]
             trainer_name = member.get("trainer_name") or member.get("name") or "Unknown"
+
             current_total_fans = member.get("fans", 0)
             prev_data = existing_members.get(viewer_id, {})
             
@@ -216,11 +213,11 @@ def process_club_sub_batch(api_start, api_end):
                 requests.post(DISCORD_WEBHOOK_URL, json={"content": f"**Data Stream: Ranks {min(r for r,l in stream_buffer)} to {max(r for r,l in stream_buffer)}**\n" + "\n".join(l for r,l in stream_buffer)}, timeout=10)
             stream_buffer = []
 
-    # --- FLUSH LEFTOVER DISCORD MESSAGES ---
+    # Flush leftover logs to Discord
     if stream_buffer and DISCORD_WEBHOOK_URL:
         requests.post(DISCORD_WEBHOOK_URL, json={"content": f"**Data Stream: Ranks {min(r for r,l in stream_buffer)} to {max(r for r,l in stream_buffer)}**\n" + "\n".join(l for r,l in stream_buffer)}, timeout=10)
             
-    # --- EXECUTE GLOBAL BATCH WRITES ---
+    # Execute massive batch writes globally to save Azure CPU time
     if global_club_ops:
         log.info(f"Executing Global DB Batch: {len(global_club_ops)} Clubs...")
         clubs_col.bulk_write(global_club_ops, ordered=False)
